@@ -2,10 +2,11 @@
 
 ## 0. 当前版本与证据边界
 
-- Git 分支：`v1.1`
+- Git 分支：`v1.2`
 - V0：Copy Baseline
 - V1：Naive Transpose
-- 下一版本：V2 Shared Memory Tiled
+- V2：Shared Memory Tiled（`tile[32][32]`）
+- 下一版本：V3 Padded Shared Memory
 - GPU：RTX 3090，`sm_86`
 - CUDA Toolkit：12.4
 - 正式构建：C++17 / CUDA C++17、Release、`-O3 -lineinfo`
@@ -39,8 +40,9 @@ cmake --build build -j
 ### 1.2 演示与测试
 
 ```bash
-./build/transpose_v1 --kernel copy --shape 31x33
-./build/transpose_v1 --kernel naive --shape 31x33
+./build/transpose_v2 --kernel copy --shape 31x33
+./build/transpose_v2 --kernel naive --shape 31x33
+./build/transpose_v2 --kernel tiled --shape 31x33
 ctest --test-dir build --output-on-failure
 ```
 
@@ -72,10 +74,10 @@ compute-sanitizer --tool racecheck ./build/transpose_test
 
 ### 1.5 Nsight Systems：纯命令行
 
-分析本版本新增的 Naive Kernel：
+分析本版本新增的 Tiled Kernel：
 
 ```bash
-./scripts/profile_nsys.sh naive
+./scripts/profile_nsys.sh tiled
 ```
 
 分析 Copy Baseline：
@@ -89,12 +91,12 @@ compute-sanitizer --tool racecheck ./build/transpose_test
 ## 2. 文件与调用关系
 
 ```text
-transpose_v1 main
-  ├─ 解析 --kernel copy|naive 与 --shape
+transpose_v2 main
+  ├─ 解析 --kernel copy|naive|tiled 与 --shape
   ├─ 创建 Host 输入和对应 CPU Reference
   ├─ cudaMalloc 输入/输出
   ├─ cudaMemcpy HostToDevice
-  ├─ launch_copy 或 launch_naive
+  ├─ launch_copy、launch_naive 或 launch_tiled
   │    ├─ 相同 Grid
   │    ├─ 相同 Block=(32,8)
   │    ├─ 不使用动态 Shared Memory
@@ -106,18 +108,18 @@ transpose_v1 main
 
 transpose_test
   ├─ 手算验证 CPU Transpose Reference
-  ├─ 回归 V0 Copy
-  └─ 验证 V1 Naive 的全部 Shape 与特殊位模式
+  ├─ 回归 V0 Copy 与 V1 Naive
+  └─ 验证 V2 Tiled 的全部 Shape 与特殊位模式
 
 transpose_bench
   ├─ 同一进程、同一输入、同一 Device Buffer
-  ├─ 独立预热 Copy 和 Naive
+  ├─ 独立预热 Copy、Naive 和 Tiled
   ├─ CUDA Event 测量各版本
   ├─ 计时后分别验证正确性
   └─ 输出绝对时间、有效带宽和相对指标
 ```
 
-`src/transpose/transpose.cu` 同时保存两个 Kernel、Host 启动逻辑和演示 `main()`。测试和 Benchmark 编译同一源码的 Core 模式，避免复制 Kernel 实现。
+`src/transpose/transpose.cu` 同时保存三个 Kernel、Host 启动逻辑和演示 `main()`。测试和 Benchmark 编译同一源码的 Core 模式，避免复制 Kernel 实现。
 
 ## 3. V0 Copy Baseline
 
@@ -350,10 +352,73 @@ NCU 已证明 Global Store 事务效率下降
 
 因为当前环境没有取得该硬件指标。
 
-## 10. 进入 V2 前需要回答
+## 10. V2 Shared Memory Tiled Transpose
+
+### 10.1 本版本唯一主要变化
+
+V2 保留 `(32, 8)` Block、相同 Grid、输入、输出和计时规则，只增加 `__shared__ float tile[32][32]`：
+
+```text
+连续 Global Load
+→ tile[原行][原列]
+→ __syncthreads()
+→ tile[原列][原行]
+→ 连续 Global Store
+```
+
+加载阶段，一个 Warp 的 `threadIdx.x` 连续，因此 `input[input_y * width + input_x]` 连续。写回阶段交换 Block 坐标，Warp 写入 `output[output_y * height + output_x]` 的连续 `output_x`。Shared Memory 负责在两种连续 Global Memory 布局之间重排数据。
+
+### 10.2 为什么必须同步
+
+同一线程写入的 Shared Memory 元素可能由另一个线程读取。`__syncthreads()` 同时提供 Block 级执行屏障和 Shared Memory 可见性保证；所有线程都无条件到达屏障，边界判断只包围访问，不包围同步，因此不完整 Tile 也不会发生条件同步死锁。
+
+### 10.3 边界坐标
+
+输入阶段检查：
+
+```text
+input_x < width && input_y < height
+```
+
+输出逻辑 Shape 是 `width × height`，所以写回阶段检查：
+
+```text
+output_x < height && output_y < width
+```
+
+这一交换对 `31×33`、`33×31` 和 `4097×3073` 等非整除矩形尤其重要。
+
+### 10.4 本版本刻意保留的 Bank Conflict
+
+V2 的 Shared Memory 行跨度是 32 个 `float`。交换索引后，同一 Warp 读取 `tile[threadIdx.x][固定列]`，相邻线程地址相差 32 个 word，会映射到相同 Bank，形成经典的 Bank Conflict。V2 不加入 Padding；v1.3 将只把布局改为 `tile[32][33]`，验证地址映射变化。
+
+在当前容器不能访问 NCU 计数器的条件下，Bank Conflict 是由地址映射推导出的算法属性，不能写成已经由硬件指标实测证明。
+
+### 10.5 命令
+
+```bash
+./build/transpose_v2 --kernel tiled --shape 31x33
+ctest --test-dir build --output-on-failure
+compute-sanitizer --tool memcheck ./build/transpose_test
+compute-sanitizer --tool racecheck ./build/transpose_test
+./build/transpose_bench --kernel all --shape 4096x4096 --warmup 20 --iterations 100 --groups 5
+./scripts/profile_nsys.sh tiled
+```
+
+未来在允许性能计数器的环境中运行：
+
+```bash
+./scripts/profile_ncu.sh tiled
+```
+
+### 10.6 预览结果与证据边界
+
+正式提交前的 4096×4096 预览显示：Copy P50 `161.516 us`，Naive P50 `449.638 us`，Tiled P50 `168.243 us`。Tiled 达到 Copy 有效带宽的约 96.0%，相对 Naive 加速约 2.67 倍。该结果只用于确认优化方向；正式表格必须在代码提交后重新构建并生成带正确 Git Commit 的 CSV。
+
+## 11. 进入 V3 前需要回答
 
 1. Naive Transpose 是读不连续还是写不连续？
-2. 为什么 V0 与 V1 必须使用相同 Shape、Block 和统计方法？
-3. 为什么 Copy 不是转置算法，却适合作为带宽参考？
-4. 为什么 NSYS 能证明 V1 更慢，却不能直接证明 Bank Conflict？
-5. 为什么 Shared Memory 可以把跨步 Global Store 改为连续写入？
+2. Shared Memory 为什么能让 Global Load 和 Store 同时连续？
+3. 为什么 `__syncthreads()` 不能只放在边界判断内部？
+4. 为什么 `tile[32][32]` 的转置读会发生 Bank Conflict？
+5. NSYS 能验证 V2 的哪些事实，又不能验证哪些微架构指标？

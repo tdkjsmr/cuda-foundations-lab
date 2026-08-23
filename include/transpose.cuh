@@ -32,4 +32,11 @@ void launch_naive(const float* device_input,
                   std::size_t height,
                   cudaStream_t stream = nullptr);
 
+// 启动 V2 Shared Memory Tiled Transpose；使用 32×32 未 Padding Tile。
+void launch_tiled(const float* device_input,
+                  float* device_output,
+                  std::size_t width,
+                  std::size_t height,
+                  cudaStream_t stream = nullptr);
+
 }  // namespace cuda_foundations::transpose

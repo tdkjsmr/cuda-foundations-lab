@@ -14,7 +14,7 @@
 
 namespace {
 
-// 两个 Host 启动函数拥有相同签名，测试可用统一流程调用 V0 或 V1。
+// 三个 Host 启动函数拥有相同签名，测试可用统一流程调用 V0 或 V1。
 using LaunchFunction = void (*)(const float*,
                                 float*,
                                 std::size_t,
@@ -118,7 +118,7 @@ int main() {
 
     bool all_passed = verify_cpu_transpose_reference();
 
-    // 每个 Shape 都同时回归 V0 Copy 和新增的 V1 Naive Transpose。
+    // 每个 Shape 都回归 V0 Copy、V1 Naive 和新增的 V2 Tiled Transpose。
     for (const auto& [width, height] : shapes) {
         const std::size_t element_count =
             cuda_foundations::test::checked_element_count(width, height);
@@ -143,6 +143,16 @@ int main() {
                          input,
                          "naive_v1",
                          cuda_foundations::transpose::launch_naive,
+                         true,
+                         shape_name) &&
+                     all_passed;
+
+        all_passed = run_kernel_case(
+                         width,
+                         height,
+                         input,
+                         "tiled_v2",
+                         cuda_foundations::transpose::launch_tiled,
                          true,
                          shape_name) &&
                      all_passed;
@@ -180,11 +190,21 @@ int main() {
                      "special_bit_patterns") &&
                  all_passed;
 
+    all_passed = run_kernel_case(
+                     4U,
+                     2U,
+                     special_values,
+                     "tiled_v2",
+                     cuda_foundations::transpose::launch_tiled,
+                     true,
+                     "special_bit_patterns") &&
+                 all_passed;
+
     if (!all_passed) {
-        std::cerr << "Transpose V0/V1 测试失败" << std::endl;
+        std::cerr << "Transpose V0/V1/V2 测试失败" << std::endl;
         return EXIT_FAILURE;
     }
 
-    std::cout << "Transpose V0/V1 全部正确性与边界测试通过" << std::endl;
+    std::cout << "Transpose V0/V1/V2 全部正确性与边界测试通过" << std::endl;
     return EXIT_SUCCESS;
 }

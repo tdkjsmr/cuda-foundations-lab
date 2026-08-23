@@ -221,7 +221,7 @@ dynamic_range
 
 全 1 只用于其中一个用例，不作为唯一正确性依据。
 
-本轮实际检查结果：
+本轮 V0/V1 实际检查结果：
 
 ```text
 CTest：2/2 PASS（Transpose + Reduction）
@@ -364,7 +364,50 @@ compute-sanitizer --tool synccheck ./build/reduction_test
 
 ## 12. V1 正式结果与 NSYS 证据
 
-代码提交并重新构建后填写 `results/raw/reduction_v1_comparison.csv` 和 `results/nsys/reduction_v1_sequential*`。
+### 12.1 CUDA Event 正式对比
+
+测试设备、输入、Block、Workspace、多阶段调度和 `20 × 100 × 5` 统计方法完全相同。P50 结果如下：
+
+| N | V0 Interleaved (μs) | V1 Sequential (μs) | V1 Speedup | V1 P95 (μs) |
+|---:|---:|---:|---:|---:|
+| 1 | 2.970 | 2.437 | 1.219× | 2.456 |
+| 31 | 2.990 | 2.406 | 1.243× | 2.431 |
+| 32 | 2.970 | 2.406 | 1.234× | 2.456 |
+| 33 | 2.990 | 2.396 | 1.248× | 2.406 |
+| 255 | 2.877 | 2.396 | 1.201× | 2.396 |
+| 256 | 2.877 | 2.406 | 1.196× | 2.492 |
+| 257 | 5.714 | 5.069 | 1.127× | 5.515 |
+| 1,023 | 5.837 | 4.854 | 1.203× | 4.887 |
+| 1,024 | 5.888 | 5.274 | 1.117× | 19.628 |
+| 1,025 | 5.919 | 4.792 | 1.235× | 4.833 |
+| 1,000,003 | 28.140 | 20.347 | 1.383× | 20.355 |
+| 16,777,219 | 347.310 | 211.343 | 1.643× | 211.403 |
+
+V1 在全部规定规模的 P50 上均更快。大输入的收益更明显：`N=1,000,003` 降低 27.69%，`N=16,777,219` 降低 39.15%。小输入仍主要由 1～2 次 Launch 的固定成本主导，因此绝对收益有限。
+
+`N=1,024` 的 V1 P95 为 19.628 μs，明显偏离其 5.274 μs P50 及相邻规模；原始波动被如实保留，没有筛除。它不改变 P50 的优化方向，但说明小任务容易被系统抖动放大。原始 24 条记录见 `results/raw/reduction_v1_comparison.csv`。
+
+全部结果满足题目规定的输入相关 tolerance。V1 的 `dynamic_range` 用例由于 `±1e8` 强消去和不同 FP32 加法顺序，absolute error 为 32.25，但 normalized error 仅 `9.430e-10`；随机、全零、全一、正负交替及全部边界 N 同时通过。
+
+### 12.2 NSYS 阶段对比
+
+V1 报告捕获到 18 次 `sequential_reduction_kernel`，严格重复 6 组：
+
+```text
+3907 → 16 → 1
+```
+
+| Grid | V0 平均 Kernel (μs) | V1 平均 Kernel (μs) | 阶段 Speedup | V1 时间占比 |
+|---:|---:|---:|---:|---:|
+| 3,907 | 22.430 | 15.664 | 1.432× | 80.97% |
+| 16 | 2.539 | 1.881 | 1.350× | 9.72% |
+| 1 | 2.460 | 1.801 | 1.366× | 9.31% |
+
+18 次 Kernel 总时间由 V0 的 164.568 μs 降至 V1 的 116.075 μs，NSYS 阶段汇总加速 `1.418×`。两版本仍为 16 registers/thread、1,024 B static shared memory、同样的 Grid/Block 和 18 次 Launch，说明测得的下降不是由减少阶段、Block 或 Shared Memory 容量造成。
+
+V1 仍只有一次约 4 MB H2D 和一次 4 B D2H，中间 Partial Sums 没有回到 CPU。`cudaLaunchKernel` 中位 Host API 时间为 3.413 μs。NSYS 插桩下 Event 时间为 26.368 μs，不能替代无 Profiler 的正式 P50。
+
+结论边界：源码与性能数据符合“Sequential 减少 Warp 内无效分支工作”的假设，但 NSYS 不提供 Branch Efficiency、Warp Stall、Achieved Occupancy 或 DRAM Throughput。当前 Docker 无 NCU 计数器权限，因此不把这一因果解释写成已由硬件计数器证明的事实。
 
 ## 13. 进入 V2 前需要回答
 

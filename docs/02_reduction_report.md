@@ -53,7 +53,7 @@ compute-sanitizer --tool synccheck ./build/reduction_test
 
 ```bash
 ./build/reduction_bench \
-  --kernel interleaved \
+  --kernel warp_shuffle \
   --size 16777219 \
   --warmup 20 \
   --iterations 100 \
@@ -62,15 +62,18 @@ compute-sanitizer --tool synccheck ./build/reduction_test
 ./scripts/run_reduction_v3_benchmarks.sh
 ```
 
+正式脚本先把 60 条记录写入同目录临时 CSV；全部命令成功且行数验证为 61 后才原子替换 `results/raw/reduction_v3_comparison.csv`。失败或中断会清理临时文件并保留上一份完整正式结果，因此可以安全重复执行。
+
 ### 1.5 Profiler
 
 ```bash
 ./scripts/profile_reduction_v3_nsys.sh
 ```
 
-未来在允许性能计数器的环境运行：
+未来在允许性能计数器的环境中，对同一负载采集 V0/V3 NCU 对比：
 
 ```bash
+./scripts/profile_reduction_ncu.sh
 ./scripts/profile_reduction_v3_ncu.sh
 ```
 
@@ -78,14 +81,14 @@ compute-sanitizer --tool synccheck ./build/reduction_test
 
 ```text
 reduction main
-  ├─ 解析 --size 与 --pattern
+  ├─ 解析 --kernel、--size 与 --pattern
   ├─ 生成 Host 输入和 double CPU Reference
   ├─ cudaMalloc 输入与两块 Ping-Pong Workspace
   ├─ cudaMemcpy HostToDevice
-  ├─ reduce_interleaved
-  │    ├─ Stage 0：N → ceil(N / 256)
-  │    ├─ Stage 1：partials → 更少 partials
-  │    ├─ ...
+  ├─ reduce(version) 统一调度 V0～V3
+  │    ├─ V0/V1 每阶段：N → ceil(N / 256)
+  │    ├─ V2/V3 每阶段：N → ceil(N / 512)
+  │    ├─ Workspace A/B 在 Device 上交替读写
   │    └─ Final Stage：partials → 1
   ├─ cudaDeviceSynchronize
   ├─ 只复制一个 float 回 Host
@@ -160,12 +163,11 @@ stride=4：lane 0,8,16,24 活跃
 对于 `N=1,000,003`：
 
 ```text
-Stage 0：1,000,003 → 3,907
-Stage 1：3,907 → 16
-Stage 2：16 → 1
+V0/V1：1,000,003 → 3,907 → 16 → 1
+V2/V3：1,000,003 → 1,954 → 4 → 1
 ```
 
-共 3 次 Kernel Launch。Partial Sums 不复制回 CPU，Host 只在最后 D2H 一个 float。
+四个版本都需要 3 次 Kernel Launch，但 V2/V3 每个 Block 覆盖 512 个输入，因此 Partial Sum 更少。Partial Sums 不复制回 CPU，Host 只在最后 D2H 一个 float。
 
 `N=1` 也执行一次 Kernel，使所有输入规模共享同一条 Device 归约路径。
 
@@ -684,15 +686,50 @@ V3 捕获到 18 次 `warp_shuffle_reduction_kernel`，严格重复 6 组：
 
 两版具有同样的 Grid、Block、16 registers/thread 和 1,024 B static Shared Memory。V3 仍只有一次约 4 MB H2D 与一次 4 B D2H，证明中间 Partial Sums 没有返回 Host；`cudaLaunchKernel` 共 18 次，中位 Host API 时间为 `3.513 μs`。NSYS 插桩下 Event 时间是 `15.776 μs`，高于无 Profiler 的正式 `10.035 μs`，因此只用于阶段与时间线分析。
 
-NSYS 可以证明时间、Grid、Launch、资源字段和传输结构，但不能直接证明屏障 Stall、Shared Memory 指令数量、Achieved Occupancy 或 DRAM Throughput。源码可严格计数 V2/V3 的屏障结构，硬件级因果仍需未来用 `scripts/profile_reduction_v3_ncu.sh` 验收；当前容器继续受 `ERR_NVGPUCTRPERM` 限制。
+NSYS 可以证明时间、Grid、Launch、资源字段和传输结构，但不能直接证明屏障 Stall、Shared Memory 指令数量、Achieved Occupancy 或 DRAM Throughput。源码可严格计数 V2/V3 的屏障结构，硬件级因果仍需未来用 `scripts/profile_reduction_ncu.sh` 与 `scripts/profile_reduction_v3_ncu.sh` 做 V0/V3 对比验收；当前容器继续受 `ERR_NVGPUCTRPERM` 限制。
 
-## 18. Reduction 子项目验收结论
+## 18. Reduction 原题八问口述验收
 
-1. V0 为什么慢：交错活跃线程让同一 Warp 中大量 Lane 不执行加法，同时仍有完整 8 轮 Shared 归约与屏障。
-2. V1 改了什么：连续前半线程参与每轮归约，保持 Grid 和阶段结构不变，隔离寻址方式这一变量。
-3. V2 改了什么：每线程加载并相加最多两个连续输入，把每 Block 覆盖率从 256 提高到 512，减少 Grid、Partial Sums，并在部分 N 上减少 Launch。
-4. V3 改了什么：保持 V2 的加载与 Grid，只把最后 64 个值转入 Register Shuffle，将每 Block 的 Block 屏障从 9 次降到 3 次。
-5. 为什么仍需 stride=64 后屏障：第二个 Warp 写 `shared[32..63]`，首 Warp 随后读取，必须建立跨 Warp 的 Shared Memory 可见性。
-6. 为什么 full mask 合法：首 Warp 全部 32 个 Lane 都存在、都到达每次 Shuffle；越界输入 Lane 贡献 0 且不提前退出。
-7. 如何证明优化到位：V2/V3 结构变量相同，两个大输入正式 P50 提升 `1.394×/1.382×`，NSYS 三阶段全部下降且总 Kernel 时间提升 `1.426×`；正确性与 Sanitizer 同时通过。
-8. 当前证据不能回答什么：没有 NCU 计数器就不能声称测得具体 Stall 原因、Occupancy 或实际显存吞吐。
+### 18.1 为什么并行求和结果与 CPU 串行求和不完全相同？
+
+浮点加法不满足严格结合律。CPU Reference 按输入顺序使用 double 串行累加；GPU 使用 FP32 树形归约，不同线程先计算不同局部和，加法顺序与精度都不同，因此舍入误差通常不同。验收应比较输入相关误差阈值，而不是要求 bitwise 相等。
+
+### 18.2 为什么不能只用相对误差判断接近零的结果？
+
+正负数抵消后 Reference 可能接近 0，此时用 `absolute_error / abs(reference)` 会因分母很小而被无限放大，甚至无法定义。本项目同时报告 absolute error，并使用 `absolute_error / max(sum(abs(input)), 1)` 作为 normalized error；最终阈值为 `5e-6 × sum(abs(input)) + 1e-5`。
+
+### 18.3 为什么 Interleaved Addressing 会造成 Warp Divergence？
+
+V0 每轮只让满足 `tid % (2 × stride) == 0` 的线程相加，活跃 Lane 在同一 Warp 中交错分布。不满足条件的 Lane 不能执行加法，却仍随 Warp 前进并参加屏障；随着 stride 增大，有效 Lane 越来越少。V1 让 `[0, stride)` 连续线程参与，使完整活跃 Warp 与不活跃 Warp 尽量分离。
+
+### 18.4 为什么 First Add During Load 可以减少 Block 数？
+
+V1 每个线程加载一个元素，一个 256-thread Block 覆盖 256 个输入。V2/V3 每个线程分别检查并合并 `input[first]` 与 `input[second]`，所以一个 Block 最多覆盖 512 个输入，第一阶段 Grid 从 `ceil(N/256)` 降为 `ceil(N/512)`，后续 Partial Sum 也按相同覆盖率继续归约。
+
+### 18.5 为什么最后一个 Warp 可以不使用 `__syncthreads()`？
+
+V3 在 stride=64 后先保留一次 `__syncthreads()`，保证第二个 Warp 写入的 `shared[32..63]` 对首 Warp 可见。之后 64 个值被首 Warp 装入 Register，全部 32 个 Lane 通过 `__shfl_down_sync()` 直接交换 Register 值，不再存在 Shared Memory 的跨 Warp 依赖，因此无需 Block 级屏障。Shuffle 不是 Shared Memory barrier，这也是前一个 Block 屏障不能删除的原因。
+
+### 18.6 `__shfl_down_sync()` 中的 mask 表示什么？
+
+mask 是本次 Warp intrinsic 的参与 Lane 位集合：mask 中尚未退出的线程必须以相同 mask 执行同一次 Shuffle。它不是有效输入元素的位图。V3 固定启动完整 Block，越界线程贡献 0 且不提前返回；首 Warp 32 个 Lane 都执行所有 Shuffle，所以 `0xFFFFFFFFU` 合法。
+
+### 18.7 非 2 的幂输入如何保证不越界？
+
+Grid 使用无溢出的向上取整公式。V0/V1 每个线程检查自己的单次 Global Load；V2/V3 对 first 和 second 两个索引分别检查。越界线程不退出，而是把加法单位元 0 写进自己的 Shared 槽位，因此固定 256 线程的归约树始终只读取已初始化位置，最后一个不完整 Block 和后续不规则 Partial Sum 阶段都安全。
+
+### 18.8 为什么高 Occupancy 不一定带来更高 Reduction 带宽？
+
+Occupancy 只说明一个 SM 能驻留多少 Warp，不等同于这些 Warp 每周期都在完成有效工作。如果 Kernel 主要受 Block 屏障、低效分支、指令开销、访存延迟或带宽上限约束，提高驻留 Warp 数可能没有收益。V2/V3 的 NSYS 资源字段相同，而 V3 通过减少屏障和 Shared Memory 路径仍明显变快，正说明 Occupancy 不能单独预测性能；当前环境没有 NCU 权限，因此不声称已经测得具体 Achieved Occupancy。
+
+## 19. Reduction 最终因果链
+
+```text
+Interleaved：Warp 内活跃 Lane 交错
+→ Sequential：活跃线程连续化
+→ First Add：每 Block 覆盖 256 → 512，减少 Partial Sum
+→ Warp Shuffle：最后 64 项进入 Register，Block 屏障 9 → 3
+→ 大输入 P50 相对 V2 提升 1.394× / 1.382×
+```
+
+正确性、Sanitizer、CUDA Event 与 NSYS 已形成闭环；NCU V0/V3 硬件计数器对比是当前容器权限造成的明确外部缺口，不以推断替代。

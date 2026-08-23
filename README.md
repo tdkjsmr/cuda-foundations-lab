@@ -6,6 +6,8 @@
 
 Transpose 子项目最终分支：`v1.3`。
 
+Reduction 子项目最终分支：`v2.3`。
+
 当前保留四个 Transpose 版本：
 
 - V0 Copy Baseline：`output[y][x] = input[y][x]`；
@@ -38,7 +40,7 @@ docs/                       中文实现与性能分析报告
 - 性能：Padded 相对 Naive 加速 `2.72×–3.15×`，达到 Copy 的 `93.68%–100.31%`；
 - Profiler：V0–V3 NSYS 报告已归档；NCU 因容器权限不可采集。
 
-## Reduction V0/V1/V2/V3 当前状态
+## Reduction 最终状态（V0–V3）
 
 - Interleaved Addressing：已保留为 V0 基线；
 - Sequential Addressing：已实现为 V1，连续前半线程参与归约；
@@ -69,7 +71,7 @@ cmake --build build -j
 ./scripts/profile_nsys.sh tiled
 ./scripts/profile_nsys.sh padded
 
-./build/reduction --size 1000003 --pattern random
+./build/reduction --kernel warp_shuffle --size 1000003 --pattern random
 ./scripts/run_reduction_v3_benchmarks.sh
 ./scripts/profile_reduction_v3_nsys.sh
 ```
@@ -116,6 +118,7 @@ Reduction V0/V1/V2/V3：
 ```bash
 ./scripts/profile_ncu.sh tiled
 ./scripts/profile_ncu.sh padded
+./scripts/profile_reduction_ncu.sh
 ./scripts/profile_reduction_v3_ncu.sh
 ```
 

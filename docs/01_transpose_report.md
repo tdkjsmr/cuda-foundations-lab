@@ -496,9 +496,46 @@ compute-sanitizer --tool racecheck ./build/transpose_test
 ./scripts/profile_ncu.sh padded
 ```
 
-### 11.5 预览结果
+### 11.5 正式 Benchmark 结果
 
-提交前的 4096×4096 预览中，Tiled P50 为 `168.264 us`，Padded P50 为 `166.042 us`，Padding 暂时显示约 `1.34%` 的 Kernel 时间改善。该数字只用于检查优化方向；正式结论要在提交实现后重新构建并生成 commit-aware CSV。
+以下结果由实现提交 `f26e668` 构建生成，完整 16 行数据保存在 `results/raw/transpose_v3.csv`：
+
+| Shape | V2 P50 (us) | V3 P50 (us) | V3 GB/s | V3 / Copy | V3 vs V2 | V3 vs Naive |
+|---|---:|---:|---:|---:|---:|---:|
+| 1024×8192 | 83.968 | 82.545 | 813.001 | 100.310% | 1.72% 更快 | 3.152× |
+| 8192×1024 | 85.238 | 83.886 | 800.000 | 98.291% | 1.61% 更快 | 2.723× |
+| 4096×4096 | 168.356 | 165.949 | 808.787 | 97.155% | 1.45% 更快 | 2.730× |
+| 4097×3073 | 131.144 | 129.526 | 777.611 | 93.683% | 1.25% 更快 | 2.769× |
+
+Padding 在四种 Shape 上都降低了 P50，改善范围为 `1.25%–1.72%`，并且 V2/V3 自身的组间标准差都远小于这项差异。`1024×8192` 上的 100.310% 表示 Padded 与 Copy 软件基线已处在同一水平附近，受测量波动和不同指令路径影响；它不表示超过了物理显存带宽上限。
+
+### 11.6 V3 NSYS 证据
+
+`results/nsys/transpose_v3_padded.nsys-rep` 捕获 6 次 Padded Kernel，平均 `164.288 us`、中位数 `164.555 us`、范围 `162.650–164.858 us`。与先前 V2 报告的平均 `168.057 us` 相比，NSYS 的 Device 时间方向与正式 Benchmark 一致。
+
+NSYS CSV 把 Static Shared Memory 四舍五入显示成 `0.004 MB`；查询该报告导出的 SQLite 原始字段可得到精确资源值：
+
+| Version | Registers/thread | Static Shared Memory | Dynamic Shared Memory |
+|---|---:|---:|---:|
+| Tiled V2 | 26 | 4096 bytes | 0 |
+| Padded V3 | 26 | 4224 bytes | 0 |
+
+这证明实际 Launch 保持相同 Register 数，只增加了预期的 `32 × 1 × 4 = 128` bytes 静态 Shared Memory。Grid、Block、H2D/D2H 大小和 Stream 顺序也保持不变。
+
+### 11.7 是否优化到位
+
+从本阶段可获得的证据看，Padding 优化已经到位：
+
+```text
+单变量资源变化正确
++ 全部 Shape 位级正确
++ memcheck/racecheck 通过
++ 四个 Shape 的 Event P50 全部改善
++ NSYS Device 时间趋势一致
++ V3 达到 Copy 的 93.68%–100.31%
+```
+
+不过结论应限定为“性能结果符合减少 Bank Conflict 的预期”，而不是“NSYS 已测得 Bank Conflict 消失”。后者仍需要允许访问硬件计数器的环境，用 NCU 对照 Shared Memory 冲突和 Warp Stall 指标。
 
 ## 12. Transpose 口头验收问题
 

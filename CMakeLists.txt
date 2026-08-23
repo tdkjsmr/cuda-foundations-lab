@@ -87,5 +87,5 @@ configure_cuda_target(reduction_bench)
 
 if(BUILD_TESTING)
     add_test(NAME transpose_correctness COMMAND transpose_test)
-    add_test(NAME reduction_interleaved_correctness COMMAND reduction_test)
+    add_test(NAME reduction_v0_v1_correctness COMMAND reduction_test)
 endif()

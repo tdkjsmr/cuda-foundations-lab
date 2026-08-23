@@ -23,7 +23,9 @@ struct TestCase {
 };
 
 // 执行 H2D → GPU 多阶段归约 → D2H，并检查结构信息与数值误差。
-bool run_case(const TestCase& test_case) {
+bool run_case(
+    cuda_foundations::reduction::KernelVersion kernel_version,
+    const TestCase& test_case) {
     const std::vector<float> host_input = cuda_foundations::reduction::make_input(
         test_case.input_count, test_case.pattern);
     const cuda_foundations::reduction::CpuReference reference =
@@ -51,8 +53,11 @@ bool run_case(const TestCase& test_case) {
         device_input, host_input.data(), input_bytes, cudaMemcpyHostToDevice));
 
     const cuda_foundations::reduction::ReductionLaunchInfo launch_info =
-        cuda_foundations::reduction::reduce_interleaved(
-            device_input, workspace_a, workspace_b, test_case.input_count);
+        cuda_foundations::reduction::reduce(kernel_version,
+                                             device_input,
+                                              workspace_a,
+                                              workspace_b,
+                                              test_case.input_count);
 
     // 测试路径同步全部阶段，尽早暴露越界、非法地址和异步 Launch 错误。
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -69,10 +74,16 @@ bool run_case(const TestCase& test_case) {
     const std::size_t expected_partials =
         cuda_foundations::reduction::workspace_elements(test_case.input_count);
     const std::size_t expected_launches =
-        cuda_foundations::reduction::interleaved_launch_count(test_case.input_count);
+        kernel_version == cuda_foundations::reduction::KernelVersion::kInterleaved
+            ? cuda_foundations::reduction::interleaved_launch_count(
+                  test_case.input_count)
+            : cuda_foundations::reduction::sequential_launch_count(
+                  test_case.input_count);
     if (launch_info.first_stage_partial_count != expected_partials ||
         launch_info.launch_count != expected_launches) {
-        std::cerr << "[FAIL] " << test_case.name
+        std::cerr << "[FAIL] "
+                  << cuda_foundations::reduction::kernel_name(kernel_version) << " "
+                  << test_case.name
                   << ": Partial Sum 或 Launch 数量不符合多阶段计划" << std::endl;
         return false;
     }
@@ -88,7 +99,9 @@ bool run_case(const TestCase& test_case) {
         return false;
     }
 
-    std::cout << std::setprecision(6) << "[PASS] " << test_case.name
+    std::cout << std::setprecision(6) << "[PASS] "
+              << cuda_foundations::reduction::kernel_name(kernel_version) << " "
+              << test_case.name
               << " N=" << test_case.input_count
               << " pattern="
               << cuda_foundations::reduction::pattern_name(test_case.pattern)
@@ -139,16 +152,24 @@ int main() {
     test_cases.push_back(
         {kPatternTestSize, InputPattern::kDynamicRange, "dynamic_range"});
 
+    // 两个版本运行完全相同的输入集合，防止优化破坏 V0 或 V1 的边界处理。
+    const std::vector<cuda_foundations::reduction::KernelVersion> versions = {
+        cuda_foundations::reduction::KernelVersion::kInterleaved,
+        cuda_foundations::reduction::KernelVersion::kSequential,
+    };
+
     bool all_passed = true;
-    for (const TestCase& test_case : test_cases) {
-        all_passed = run_case(test_case) && all_passed;
+    for (const cuda_foundations::reduction::KernelVersion version : versions) {
+        for (const TestCase& test_case : test_cases) {
+            all_passed = run_case(version, test_case) && all_passed;
+        }
     }
 
     if (!all_passed) {
-        std::cerr << "Reduction V0 正确性或边界测试失败" << std::endl;
+        std::cerr << "Reduction V0/V1 正确性或边界测试失败" << std::endl;
         return EXIT_FAILURE;
     }
 
-    std::cout << "Reduction V0 全部正确性、边界、误差和多阶段测试通过" << std::endl;
+    std::cout << "Reduction V0/V1 全部正确性、边界、误差和多阶段测试通过" << std::endl;
     return EXIT_SUCCESS;
 }

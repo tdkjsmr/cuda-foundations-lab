@@ -2,8 +2,8 @@
 
 ## 0. 当前版本与证据边界
 
-- Git 分支：`v2.0`
-- 当前实现：V0 Interleaved Addressing
+- Git 分支：`v2.1`
+- 当前实现：V0 Interleaved + V1 Sequential Addressing
 - Block：256 threads
 - 数据类型：FP32
 - CPU Reference：double 串行累加
@@ -301,11 +301,76 @@ N × sizeof(float) / 完整归约 P50
 
 NSYS 插桩下 benchmark Event 时间为 34.656 μs，高于无 Profiler 的正式 P50 28.436 μs，因此 NSYS 数字只用于时间线和阶段占比，不替代正式性能基线。NSYS 不能证明 Warp Divergence、Bank Conflict、Stall 原因或实际 DRAM 吞吐；这些仍需未来在允许计数器的环境中用 NCU 验收。
 
-## 10. 进入 V1 前需要回答
+## 10. V1 Sequential Addressing
 
-1. 为什么 V0 中活跃线程会在 Warp 内交错分布？
-2. 为什么越界线程应该把 Shared Memory 槽位置零？
-3. 为什么每轮 `__syncthreads()` 必须由整个 Block 执行？
-4. 为什么 Partial Sums 必须继续留在 GPU？
-5. 为什么 FP32 GPU 结果不能要求与 double CPU Reference 位级相同？
-6. NSYS 能证明多阶段结构中的哪些事实？
+### 10.1 本轮唯一主要变化
+
+V1 保持以下条件与 V0 完全相同：
+
+```text
+每线程加载 1 个元素
+Block = 256
+Grid = ceil(N / 256)
+1,024 B static shared memory
+每轮一次 __syncthreads()
+GPU 多阶段 Ping-Pong
+输入、预热、迭代、计时范围和误差标准
+```
+
+唯一主要变化是 Block 内活跃线程的选择方式：
+
+```cpp
+for (unsigned int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+    if (threadIdx.x < stride) {
+        shared[threadIdx.x] += shared[threadIdx.x + stride];
+    }
+    __syncthreads();
+}
+```
+
+V0 与 V1 的前几轮对比：
+
+```text
+V0 stride=1：lane 0,2,4,... 活跃（同一 Warp 内交错）
+V0 stride=2：lane 0,4,8,... 活跃
+
+V1 stride=128：thread 0..127 连续活跃
+V1 stride=64： thread 0..63 连续活跃
+V1 stride=32： thread 0..31 连续活跃
+```
+
+V1 让完全活跃与完全不活跃的 Warp 尽量分离；只有活跃线程数小于一个 Warp 后，最后一个 Warp 才部分活跃。这个源码结构支持“减少 Warp 内分支浪费”的算法假设，但当前环境不能用 NSYS 测出 Warp Divergence，必须等待 NCU 计数器验证。
+
+### 10.2 边界与同步
+
+最后一个不完整 Block 仍由越界线程向 Shared Memory 写 0，因此 `thread_index + stride` 始终落在已初始化的 256 个槽位内。每轮屏障仍在 `if` 外：即使某个线程本轮不做加法，也必须参与 `__syncthreads()`，否则会违反 Block 屏障的一致到达规则。
+
+## 11. V1 公平对比与验证命令
+
+```bash
+./build/reduction --kernel interleaved --size 1000003 --pattern random
+./build/reduction --kernel sequential --size 1000003 --pattern random
+./build/reduction_test
+
+compute-sanitizer --tool memcheck ./build/reduction_test
+compute-sanitizer --tool racecheck ./build/reduction_test
+compute-sanitizer --tool synccheck ./build/reduction_test
+
+./scripts/run_reduction_v1_benchmarks.sh
+./scripts/profile_reduction_v1_nsys.sh
+```
+
+正式 CSV 对每个规定 N 依次运行 Interleaved 与 Sequential；两版本使用同一个二进制、同一 deterministic random 输入和相同的 `20 × 100 × 5` 统计方法。
+
+## 12. V1 正式结果与 NSYS 证据
+
+代码提交并重新构建后填写 `results/raw/reduction_v1_comparison.csv` 和 `results/nsys/reduction_v1_sequential*`。
+
+## 13. 进入 V2 前需要回答
+
+1. V0 和 V1 每轮分别有哪些线程活跃？
+2. 为什么 V1 的活跃线程更适合 Warp 的 SIMT 执行？
+3. V1 是否减少了同步次数、Launch 次数或 Shared Memory 容量？
+4. 为什么 `thread_index + stride` 对 256 线程 Block 始终合法？
+5. NSYS 能验证 V1 的哪些结构事实，不能验证哪些 Warp 行为？
+6. 下一轮每线程加载两个元素为什么会减少首阶段 Block 数？

@@ -28,7 +28,8 @@ namespace {
 
 // 保存全部 CLI 参数；日志和 CSV 可以据此完整复现实验。
 struct Options {
-    std::string kernel_name = "interleaved";
+    cuda_foundations::reduction::KernelVersion kernel_version =
+        cuda_foundations::reduction::KernelVersion::kSequential;
     std::size_t input_count = 16777219U;
     int warmup_count = 20;
     int iteration_count = 100;
@@ -77,9 +78,16 @@ Options parse_options(int argc, char** argv) {
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
         if (argument == "--kernel" && index + 1 < argc) {
-            options.kernel_name = argv[++index];
-            if (options.kernel_name != "interleaved") {
-                throw std::invalid_argument("v2.0 的 --kernel 只支持 interleaved");
+            const std::string kernel = argv[++index];
+            if (kernel == "interleaved") {
+                options.kernel_version =
+                    cuda_foundations::reduction::KernelVersion::kInterleaved;
+            } else if (kernel == "sequential") {
+                options.kernel_version =
+                    cuda_foundations::reduction::KernelVersion::kSequential;
+            } else {
+                throw std::invalid_argument(
+                    "--kernel 必须是 interleaved 或 sequential");
             }
         } else if (argument == "--size" && index + 1 < argc) {
             options.input_count = parse_size(argv[++index], "--size");
@@ -138,7 +146,7 @@ std::string csv_escape(const std::string& value) {
 }
 
 // 对完整 GPU 多阶段归约执行预热、Event 计时和计时后的数值验证。
-BenchmarkResult benchmark_interleaved(
+BenchmarkResult benchmark_reduction(
     const Options& options,
     const std::vector<float>& host_input,
     const cuda_foundations::reduction::CpuReference& reference,
@@ -149,8 +157,11 @@ BenchmarkResult benchmark_interleaved(
 
     // 每次预热都是从原始输入开始的一次完整归约，阶段间不插入 Host 同步。
     for (int iteration = 0; iteration < options.warmup_count; ++iteration) {
-        latest_info = cuda_foundations::reduction::reduce_interleaved(
-            device_input, workspace_a, workspace_b, options.input_count);
+        latest_info = cuda_foundations::reduction::reduce(options.kernel_version,
+                                                             device_input,
+                                                             workspace_a,
+                                                             workspace_b,
+                                                             options.input_count);
     }
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -162,8 +173,11 @@ BenchmarkResult benchmark_interleaved(
     for (int group = 0; group < options.group_count; ++group) {
         timer.start();
         for (int iteration = 0; iteration < options.iteration_count; ++iteration) {
-            latest_info = cuda_foundations::reduction::reduce_interleaved(
-                device_input, workspace_a, workspace_b, options.input_count);
+            latest_info = cuda_foundations::reduction::reduce(options.kernel_version,
+                                                                 device_input,
+                                                                 workspace_a,
+                                                                 workspace_b,
+                                                                 options.input_count);
         }
         const float total_ms = timer.stop();
         const double average_us = static_cast<double>(total_ms) * 1000.0 /
@@ -179,7 +193,7 @@ BenchmarkResult benchmark_interleaved(
     const cuda_foundations::reduction::ErrorMetrics errors =
         cuda_foundations::reduction::error_metrics(gpu_result, reference);
     if (errors.absolute_error > errors.tolerance) {
-        throw std::runtime_error("Interleaved Benchmark 的数值误差超过阈值");
+        throw std::runtime_error("Reduction Benchmark 的数值误差超过阈值");
     }
 
     const cuda_foundations::benchmark::Summary timing =
@@ -230,7 +244,8 @@ void append_csv(const std::string& path,
 
     output << CUDA_FOUNDATIONS_GIT_COMMIT << ',' << utc_timestamp() << ','
            << csv_escape(properties.name) << ',' << format_cuda_version(driver_version)
-           << ',' << format_cuda_version(runtime_version) << ",interleaved_v0,"
+           << ',' << format_cuda_version(runtime_version) << ','
+           << cuda_foundations::reduction::kernel_name(options.kernel_version) << ','
            << options.input_count << ",FP32," << cuda_foundations::reduction::kBlockSize
            << ',' << result.first_stage_partial_count << ',' << options.warmup_count
            << ',' << options.iteration_count << ',' << options.group_count << ','
@@ -282,7 +297,7 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMemcpy(
             device_input, host_input.data(), input_bytes, cudaMemcpyHostToDevice));
 
-        const BenchmarkResult result = benchmark_interleaved(
+        const BenchmarkResult result = benchmark_reduction(
             options, host_input, reference, device_input, workspace_a, workspace_b);
 
         CUDA_CHECK(cudaFree(workspace_b));
@@ -290,7 +305,9 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaFree(device_input));
 
         std::cout << std::fixed << std::setprecision(6)
-                  << "Kernel: interleaved_v0\nN: " << options.input_count
+                  << "Kernel: "
+                  << cuda_foundations::reduction::kernel_name(options.kernel_version)
+                  << "\nN: " << options.input_count
                   << "\nPattern: random\nBlock: "
                   << cuda_foundations::reduction::kBlockSize
                   << "\nFirst-stage partials: " << result.first_stage_partial_count

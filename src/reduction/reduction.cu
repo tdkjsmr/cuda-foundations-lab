@@ -52,6 +52,42 @@ __global__ void interleaved_reduction_kernel(const float* input,
     }
 }
 
+// V1 保持“一线程加载一个元素”不变，只把 Block 内归约改为连续寻址。
+__global__ void sequential_reduction_kernel(const float* input,
+                                            float* partial_sums,
+                                            std::size_t input_count) {
+    // 静态 Shared Memory 容量与 V0 完全相同，仍为 256 个 FP32。
+    __shared__ float shared_values[kBlockSize];
+
+    // 每个线程仍读取当前阶段的一个连续元素，保持 Global Load 行为一致。
+    const unsigned int thread_index = threadIdx.x;
+    const std::size_t global_index =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + thread_index;
+
+    // 不完整 Block 的越界线程写入加法单位元，避免读取非法 Global Memory。
+    shared_values[thread_index] =
+        global_index < input_count ? input[global_index] : 0.0F;
+
+    // 必须等待整个 Block 完成 Shared Memory 初始化后再开始归约。
+    __syncthreads();
+
+    // stride 从 128 递减到 1；每轮由连续的前 stride 个线程执行加法。
+    for (unsigned int stride = blockDim.x / 2U; stride > 0U; stride /= 2U) {
+        // V1 的活跃线程为 [0, stride)，不再像 V0 那样在 Warp 内交错。
+        if (thread_index < stride) {
+            shared_values[thread_index] += shared_values[thread_index + stride];
+        }
+
+        // 下一轮读取本轮结果；屏障仍必须位于条件外并由全 Block 到达。
+        __syncthreads();
+    }
+
+    // 连续归约完成后，线程 0 把本 Block 的 Partial Sum 写回 Global Memory。
+    if (thread_index == 0U) {
+        partial_sums[blockIdx.x] = shared_values[0];
+    }
+}
+
 std::size_t workspace_elements(std::size_t input_count) {
     if (input_count == 0U) {
         throw std::invalid_argument("Reduction 输入元素数必须大于 0");
@@ -78,6 +114,21 @@ std::size_t interleaved_launch_count(std::size_t input_count) {
     return launch_count;
 }
 
+std::size_t sequential_launch_count(std::size_t input_count) {
+    // 两版本每个 Block 都只处理 256 个元素，因此多阶段 Launch 数完全相同。
+    return interleaved_launch_count(input_count);
+}
+
+const char* kernel_name(KernelVersion version) {
+    switch (version) {
+        case KernelVersion::kInterleaved:
+            return "interleaved_v0";
+        case KernelVersion::kSequential:
+            return "sequential_v1";
+    }
+    throw std::invalid_argument("未知 Reduction Kernel 版本");
+}
+
 // 启动一个阶段，并立即检查 Launch 配置错误；执行错误由调用方同步点捕获。
 void launch_interleaved_stage(const float* device_input,
                               float* device_output,
@@ -99,11 +150,46 @@ void launch_interleaved_stage(const float* device_input,
     CUDA_CHECK(cudaGetLastError());
 }
 
-ReductionLaunchInfo reduce_interleaved(const float* device_input,
-                                       float* workspace_a,
-                                       float* workspace_b,
-                                       std::size_t input_count,
-                                       cudaStream_t stream) {
+// V1 单阶段启动器与 V0 使用相同 Grid、Block、Stream 和错误检查语义。
+void launch_sequential_stage(const float* device_input,
+                             float* device_output,
+                             std::size_t input_count,
+                             cudaStream_t stream) {
+    const std::size_t partial_count = workspace_elements(input_count);
+    if (partial_count > std::numeric_limits<unsigned int>::max()) {
+        throw std::overflow_error("Reduction 第一维 Grid 超出 dim3 表示范围");
+    }
+
+    const dim3 block(kBlockSize, 1U, 1U);
+    const dim3 grid(static_cast<unsigned int>(partial_count), 1U, 1U);
+    sequential_reduction_kernel<<<grid, block, 0U, stream>>>(
+        device_input, device_output, input_count);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// 只在 Host 端选择 Kernel；两个版本共享完全相同的多阶段调度逻辑。
+void launch_stage(KernelVersion version,
+                  const float* device_input,
+                  float* device_output,
+                  std::size_t input_count,
+                  cudaStream_t stream) {
+    switch (version) {
+        case KernelVersion::kInterleaved:
+            launch_interleaved_stage(device_input, device_output, input_count, stream);
+            return;
+        case KernelVersion::kSequential:
+            launch_sequential_stage(device_input, device_output, input_count, stream);
+            return;
+    }
+    throw std::invalid_argument("未知 Reduction Kernel 版本");
+}
+
+ReductionLaunchInfo reduce(KernelVersion version,
+                           const float* device_input,
+                           float* workspace_a,
+                           float* workspace_b,
+                           std::size_t input_count,
+                           cudaStream_t stream) {
     // 输入、两块 Ping-Pong Workspace 必须独立且有效。
     if (device_input == nullptr || workspace_a == nullptr || workspace_b == nullptr ||
         device_input == workspace_a || device_input == workspace_b ||
@@ -122,7 +208,7 @@ ReductionLaunchInfo reduce_interleaved(const float* device_input,
 
     // 每个阶段把 current_count 缩小为 ceil(current_count / 256)。
     do {
-        launch_interleaved_stage(current_input, current_output, current_count, stream);
+        launch_stage(version, current_input, current_output, current_count, stream);
         current_count = workspace_elements(current_count);
         ++launch_count;
 
@@ -138,6 +224,32 @@ ReductionLaunchInfo reduce_interleaved(const float* device_input,
     } while (true);
 }
 
+ReductionLaunchInfo reduce_interleaved(const float* device_input,
+                                       float* workspace_a,
+                                       float* workspace_b,
+                                       std::size_t input_count,
+                                       cudaStream_t stream) {
+    return reduce(KernelVersion::kInterleaved,
+                  device_input,
+                  workspace_a,
+                  workspace_b,
+                  input_count,
+                  stream);
+}
+
+ReductionLaunchInfo reduce_sequential(const float* device_input,
+                                      float* workspace_a,
+                                      float* workspace_b,
+                                      std::size_t input_count,
+                                      cudaStream_t stream) {
+    return reduce(KernelVersion::kSequential,
+                  device_input,
+                  workspace_a,
+                  workspace_b,
+                  input_count,
+                  stream);
+}
+
 }  // namespace cuda_foundations::reduction
 
 #ifndef CUDA_FOUNDATIONS_REDUCTION_CORE_ONLY
@@ -147,6 +259,8 @@ namespace {
 // 演示程序默认使用一百万零三个随机元素，覆盖非 2 的幂和多阶段归约。
 struct DemoOptions {
     std::size_t input_count = 1000003U;
+    cuda_foundations::reduction::KernelVersion kernel_version =
+        cuda_foundations::reduction::KernelVersion::kSequential;
     cuda_foundations::reduction::InputPattern pattern =
         cuda_foundations::reduction::InputPattern::kRandom;
 };
@@ -165,12 +279,24 @@ std::size_t parse_size(const std::string& text) {
     return static_cast<std::size_t>(parsed);
 }
 
-// 解析 --size N 与 --pattern NAME，参数顺序可以互换。
+// 解析 --kernel、--size 与 --pattern，参数顺序可以互换。
 DemoOptions parse_options(int argc, char** argv) {
     DemoOptions options;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
-        if (argument == "--size" && index + 1 < argc) {
+        if (argument == "--kernel" && index + 1 < argc) {
+            const std::string kernel = argv[++index];
+            if (kernel == "interleaved") {
+                options.kernel_version =
+                    cuda_foundations::reduction::KernelVersion::kInterleaved;
+            } else if (kernel == "sequential") {
+                options.kernel_version =
+                    cuda_foundations::reduction::KernelVersion::kSequential;
+            } else {
+                throw std::invalid_argument(
+                    "--kernel 必须是 interleaved 或 sequential");
+            }
+        } else if (argument == "--size" && index + 1 < argc) {
             options.input_count = parse_size(argv[++index]);
         } else if (argument == "--pattern" && index + 1 < argc) {
             options.pattern = cuda_foundations::reduction::parse_pattern(argv[++index]);
@@ -214,8 +340,11 @@ int main(int argc, char** argv) {
 
         // Host 只调度阶段；Partial Sums 始终保留在 Device Workspace 中。
         const cuda_foundations::reduction::ReductionLaunchInfo launch_info =
-            cuda_foundations::reduction::reduce_interleaved(
-                device_input, workspace_a, workspace_b, options.input_count);
+            cuda_foundations::reduction::reduce(options.kernel_version,
+                                                device_input,
+                                                workspace_a,
+                                                workspace_b,
+                                                options.input_count);
 
         // 演示路径显式同步，以捕获多阶段中的异步执行错误。
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -232,7 +361,9 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaFree(workspace_a));
         CUDA_CHECK(cudaFree(device_input));
 
-        std::cout << "Kernel: interleaved_v0\n"
+        std::cout << "Kernel: "
+                  << cuda_foundations::reduction::kernel_name(options.kernel_version)
+                  << "\n"
                   << "N: " << options.input_count << "\n"
                   << "Pattern: "
                   << cuda_foundations::reduction::pattern_name(options.pattern) << "\n"
@@ -246,7 +377,7 @@ int main(int argc, char** argv) {
                   << "Tolerance: " << errors.tolerance << std::endl;
 
         if (errors.absolute_error > errors.tolerance) {
-            std::cerr << "Reduction V0 误差超过阈值" << std::endl;
+            std::cerr << "Reduction 误差超过阈值" << std::endl;
             return EXIT_FAILURE;
         }
 

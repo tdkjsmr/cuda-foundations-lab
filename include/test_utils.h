@@ -50,6 +50,26 @@ inline std::vector<float> copy_reference(const std::vector<float>& input) {
     return input;
 }
 
+// 在 CPU 上按行主序执行矩阵转置，输出 Shape 为 height × width。
+inline std::vector<float> transpose_reference(const std::vector<float>& input,
+                                              std::size_t width,
+                                              std::size_t height) {
+    const std::size_t element_count = checked_element_count(width, height);
+    if (input.size() != element_count) {
+        throw std::invalid_argument("Transpose Reference 的输入元素数量与 Shape 不一致");
+    }
+
+    std::vector<float> output(element_count);
+    for (std::size_t y = 0; y < height; ++y) {
+        for (std::size_t x = 0; x < width; ++x) {
+            // 输入 input[y][x] 在转置后写到 output[x][y]。
+            output[x * height + y] = input[y * width + x];
+        }
+    }
+
+    return output;
+}
+
 // 用 memcpy 读取 float 的位模式，避免类型双关违反严格别名规则。
 inline std::uint32_t float_bits(float value) {
     std::uint32_t bits = 0;

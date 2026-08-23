@@ -1,11 +1,24 @@
 # Transpose 性能报告
 
-## 0. 当前版本
+## 0. 当前版本与证据边界
 
-- Git 分支：`v1.0`
-- 实现：V0 Copy Baseline
-- 目标：建立连续读取、连续写入的实际参考带宽
-- 尚未实现：Naive Transpose、Shared Memory Tile、Padding
+- Git 分支：`v1.1`
+- V0：Copy Baseline
+- V1：Naive Transpose
+- 下一版本：V2 Shared Memory Tiled
+- GPU：RTX 3090，`sm_86`
+- CUDA Toolkit：12.4
+- 正式构建：C++17 / CUDA C++17、Release、`-O3 -lineinfo`
+
+当前 AutoDL Docker 容器禁止访问 NVIDIA GPU Performance Counters。NCU 返回 `ERR_NVGPUCTRPERM`，因此本报告不声称已经测得 DRAM 硬件吞吐率、Global Memory 事务效率、Warp Stall、Occupancy 或 Bank Conflict。
+
+当前可用证据：
+
+```text
+CUDA Event：Kernel-only 稳定时间和有效带宽
+Compute Sanitizer：越界、非法地址和数据竞争
+Nsight Systems：CUDA API、Kernel、H2D/D2H、Stream 与时间线
+```
 
 ## 1. 可复制命令
 
@@ -23,25 +36,31 @@ cmake \
 cmake --build build -j
 ```
 
-正式构建使用 CUDA C++17、`-O3`、`-lineinfo` 和 `sm_86`，不启用 `-G` 或 `--use_fast_math`。
-
 ### 1.2 演示与测试
 
 ```bash
-./build/transpose_v0 --shape 31x33
+./build/transpose_v1 --kernel copy --shape 31x33
+./build/transpose_v1 --kernel naive --shape 31x33
 ctest --test-dir build --output-on-failure
 ```
 
 ### 1.3 稳定 Benchmark
 
+单个 Shape：
+
 ```bash
 ./build/transpose_bench \
-  --kernel copy \
+  --kernel all \
   --shape 4096x4096 \
   --warmup 20 \
   --iterations 100 \
-  --groups 5 \
-  --csv results/raw/transpose_v0.csv
+  --groups 5
+```
+
+正式 Shape 扫描和 CSV：
+
+```bash
+./scripts/run_benchmarks.sh
 ```
 
 ### 1.4 Compute Sanitizer
@@ -51,68 +70,154 @@ compute-sanitizer --tool memcheck ./build/transpose_test
 compute-sanitizer --tool racecheck ./build/transpose_test
 ```
 
-### 1.5 Nsight Compute：纯命令行采集
+### 1.5 Nsight Systems：纯命令行
+
+分析本版本新增的 Naive Kernel：
 
 ```bash
-ncu \
-  --launch-skip 20 \
-  --launch-count 1 \
-  --section SpeedOfLight \
-  --section MemoryWorkloadAnalysis \
-  --section LaunchStats \
-  --section Occupancy \
-  --section WarpStateStats \
-  --import-source yes \
-  --export results/ncu/transpose_v0_copy \
-  --force-overwrite \
-  ./build/transpose_bench \
-  --kernel copy \
-  --shape 4096x4096 \
-  --warmup 20 \
-  --profile
+./scripts/profile_nsys.sh naive
 ```
 
-终端查看和 CSV 导出：
+分析 Copy Baseline：
 
 ```bash
-ncu --import results/ncu/transpose_v0_copy.ncu-rep --page details
-
-ncu \
-  --import results/ncu/transpose_v0_copy.ncu-rep \
-  --page raw \
-  --csv \
-  --log-file results/ncu/transpose_v0_copy_raw.csv
+./scripts/profile_nsys.sh copy
 ```
+
+脚本不启用 `--gpu-metrics-device`，只使用当前容器已验证可用的 CUDA、NVTX 和 OS Runtime 时间线。
 
 ## 2. 文件与调用关系
 
 ```text
-transpose_v0 main
-  ├─ 创建 Host 输入与 CPU Copy Reference
-  ├─ cudaMalloc 两个 Device Buffer
+transpose_v1 main
+  ├─ 解析 --kernel copy|naive 与 --shape
+  ├─ 创建 Host 输入和对应 CPU Reference
+  ├─ cudaMalloc 输入/输出
   ├─ cudaMemcpy HostToDevice
-  ├─ launch_copy
-  │    ├─ 计算 Grid=(ceil(width/32), ceil(height/32))
-  │    ├─ Block=(32, 8)
-  │    ├─ copy_kernel<<<grid, block>>>
+  ├─ launch_copy 或 launch_naive
+  │    ├─ 相同 Grid
+  │    ├─ 相同 Block=(32,8)
+  │    ├─ 不使用动态 Shared Memory
   │    └─ cudaGetLastError
   ├─ cudaDeviceSynchronize
   ├─ cudaMemcpy DeviceToHost
-  ├─ 位模式比较
+  ├─ 逐元素位模式比较
   └─ cudaFree
 
 transpose_test
-  └─ 调用同一个 launch_copy，覆盖全部指定 Shape 和特殊位模式
+  ├─ 手算验证 CPU Transpose Reference
+  ├─ 回归 V0 Copy
+  └─ 验证 V1 Naive 的全部 Shape 与特殊位模式
 
 transpose_bench
-  └─ 调用同一个 launch_copy，用 CUDA Event 测量多组稳定态 Kernel 时间
+  ├─ 同一进程、同一输入、同一 Device Buffer
+  ├─ 独立预热 Copy 和 Naive
+  ├─ CUDA Event 测量各版本
+  ├─ 计时后分别验证正确性
+  └─ 输出绝对时间、有效带宽和相对指标
 ```
 
-`src/transpose/transpose.cu` 同时保存 Kernel、Host 启动逻辑和演示 `main()`。测试和 Benchmark 复用其中的 `launch_copy`，但分别拥有自己的入口，因此测试逻辑不会污染正式计时路径。
+`src/transpose/transpose.cu` 同时保存两个 Kernel、Host 启动逻辑和演示 `main()`。测试和 Benchmark 编译同一源码的 Core 模式，避免复制 Kernel 实现。
 
-## 3. V0 Kernel 数据映射
+## 3. V0 Copy Baseline
 
-线程块为 `(32, 8)`，共 256 个线程。一个 Block 覆盖一个 `32×32` Tile：
+V0 执行：
+
+```cpp
+output[y * width + x] = input[y * width + x];
+```
+
+同一 Warp 的相邻线程拥有连续 `x`：
+
+```text
+input 地址：  ... 0, 1, 2, 3, ...
+output 地址： ... 0, 1, 2, 3, ...
+```
+
+读写都连续。V0 不做转置，只提供当前 Benchmark 环境下的软件可达 Copy 带宽参考。
+
+## 4. V1 Naive Transpose
+
+V1 执行：
+
+```cpp
+input_index  = y * width + x;
+output_index = x * height + y;
+output[output_index] = input[input_index];
+```
+
+### 4.1 为什么读取连续
+
+同一 Warp 中 `y` 相同、`x` 连续：
+
+```text
+input[y][0], input[y][1], input[y][2], ...
+```
+
+因此输入读取地址连续。
+
+### 4.2 为什么写入跨步
+
+转置输出的行主序 Shape 是 `height × width`。同一 Warp 中 `x` 每增加 1，输出线性地址增加 `height`：
+
+```text
+output[0 * height + y]
+output[1 * height + y]
+output[2 * height + y]
+...
+```
+
+对于 `4096×4096`，相邻线程写地址相隔：
+
+```text
+4096 float × 4 Byte = 16384 Byte
+```
+
+V1 的主要实验变量就是这种跨步写。没有引入 Shared Memory、Padding 或其他优化。
+
+### 4.3 3×2 手算
+
+输入 Shape 为 width=3、height=2：
+
+```text
+1 2 3
+4 5 6
+```
+
+行主序输入：
+
+```text
+[1, 2, 3, 4, 5, 6]
+```
+
+转置后 Shape 为 width=2、height=3：
+
+```text
+1 4
+2 5
+3 6
+```
+
+行主序输出：
+
+```text
+[1, 4, 2, 5, 3, 6]
+```
+
+测试先用这个固定结果验证 CPU Reference，再用 CPU Reference 验证 GPU。
+
+## 5. Grid、Block 与边界
+
+V0/V1 统一使用：
+
+```text
+TILE_DIM = 32
+BLOCK_ROWS = 8
+Block = (32, 8)
+Grid = (ceil(width / 32), ceil(height / 32))
+```
+
+线程坐标：
 
 ```text
 x = blockIdx.x × 32 + threadIdx.x
@@ -120,25 +225,13 @@ base_y = blockIdx.y × 32 + threadIdx.y
 y = base_y + {0, 8, 16, 24}
 ```
 
-每个线程处理同一列的四个元素。一个 Warp 内 `threadIdx.x` 从 0 到 31，因此每次循环中相邻线程读取和写入相邻 FP32 地址，形成合并访问。
-
-核心操作是：
-
-```cpp
-output[y * width + x] = input[y * width + x];
-```
-
-V0 没有转置，也没有 Shared Memory。它只回答一个问题：在完全连续的访问模式下，当前 Benchmark 环境实际能达到多少有效显存带宽。
-
-## 4. 边界处理
-
-Grid 对宽高分别向上取整。当 Shape 不是 32 的整数倍时，最后一个 Tile 会包含无效线程，因此每次 Global Memory 访问前都检查：
+访问前统一检查：
 
 ```cpp
 if (x < width && y < height)
 ```
 
-测试覆盖：
+正确性测试覆盖：
 
 ```text
 1×1
@@ -151,50 +244,99 @@ if (x < width && y < height)
 4097×3073
 ```
 
-另外使用 `+0`、`-0`、负数、重复值、带 payload 的 NaN、`+Inf` 和 `-Inf`。因为 Copy 不改变数值，测试通过 IEEE-754 位模式比较，而不是使用 `NaN == NaN`。
+特殊值覆盖 `+0`、`-0`、负数、重复值、带 payload 的 NaN、`+Inf` 和 `-Inf`。Transpose 只重排位模式，所以要求逐元素按位一致。
 
-## 5. Benchmark 方法
+## 6. Benchmark 方法
 
-正式计时前完成 Context 初始化、Device 分配、输入生成和 H2D。流程为：
+每个 Kernel 独立执行：
 
 ```text
 预热 20 次
+→ cudaDeviceSynchronize
 → 记录 start Event
 → 连续 Launch 100 次
 → 记录 stop Event
 → 等待 stop Event
 → 总时间除以 100
 → 重复 5 组
+→ 计时外 D2H 与 CPU Reference 验证
 ```
 
-报告 5 组单次平均耗时的最小值、P50、P95 和标准差。计时区间内不执行 `cudaDeviceSynchronize()`，避免人为插入逐轮同步开销。
+报告最小值、P50、P95 和标准差。计时区间不包含分配、H2D、D2H、CPU Reference 或逐轮同步。
 
-FP32 Copy 每个元素读取 4 Byte、写入 4 Byte：
+两个版本都读取和写入相同数量的 FP32 元素：
 
 ```text
-Effective Bandwidth = 2 × width × height × sizeof(float) / Kernel Time
+Effective Bandwidth
+= 2 × width × height × sizeof(float) / Kernel Time
 ```
 
-这里使用十进制 GB/s。它是软件可达的 Copy 参考带宽，不等同于显卡规格表中的理论峰值。
+相对指标：
 
-## 6. 实测结果
+```text
+Relative to Copy bandwidth
+= 当前版本有效带宽 / Copy 有效带宽 × 100%
 
-以下结果来自本机正式 Benchmark，不包含 Profiler 开销：
+Speedup relative to Naive
+= Naive P50 / 当前版本 P50
+```
 
-| Shape | Min (us) | P50 (us) | P95 (us) | Stddev (us) | Effective GB/s |
-|---|---:|---:|---:|---:|---:|
-| 4096×4096 | 161.475 | 161.505 | 161.581 | 0.045 | 831.042 |
+## 7. 正式结果
 
-本次数据来自代码提交 `3ba76f9`，原始记录保存在 `results/raw/transpose_v0.csv`。正确性测试、`memcheck` 和 `racecheck` 均为 0 错误；NCU 指标尚待按下一节命令采集，因此当前只报告 CUDA Event 实测值，不提前给出微架构瓶颈结论。
+正式 CSV 生成后填写：
 
-## 7. V0 的 Nsight 验收问题
+| Kernel | Shape | Min (us) | P50 (us) | P95 (us) | Stddev (us) | GB/s | Copy % | vs Naive |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Copy V0 | 1024×8192 | 待测 | 待测 | 待测 | 待测 | 待测 | 100% | 待测 |
+| Naive V1 | 1024×8192 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 1.00× |
+| Copy V0 | 8192×1024 | 待测 | 待测 | 待测 | 待测 | 待测 | 100% | 待测 |
+| Naive V1 | 8192×1024 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 1.00× |
+| Copy V0 | 4096×4096 | 待测 | 待测 | 待测 | 待测 | 待测 | 100% | 待测 |
+| Naive V1 | 4096×4096 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 1.00× |
+| Copy V0 | 4097×3073 | 待测 | 待测 | 待测 | 待测 | 待测 | 100% | 待测 |
+| Naive V1 | 4097×3073 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 1.00× |
 
-收到 NCU 报告后至少回答：
+## 8. 已有 V0 NSYS 证据
 
-1. DRAM Throughput 达到峰值的多少比例？
-2. Global Load/Store 是否形成合并访问？
-3. 主要 Warp Stall 是什么，是否真的阻止调度器持续发射？
-4. `(32,8)` Block 的 Registers、Shared Memory 和理论/实际 Occupancy 是多少？
-5. 长条矩阵、宽条矩阵和方阵的 Copy 带宽是否存在稳定差异？
+V0 Smoke Report 成功捕获：
 
-这些答案必须来自实际 NCU 指标，不在采集前预设结论。
+- 6 次 Copy Kernel：5 次预热和 1 次正式 Launch；
+- Kernel 平均约 `160.932 us`，中位数约 `161.108 us`；
+- H2D 约 `6.586 ms`，D2H 约 `7.016 ms`；
+- 稳态 `cudaLaunchKernel` 中位数约 `4.825 us`；
+- 首次 `cudaMalloc` 和首次 Launch 存在明显冷启动成本。
+
+这证明 NSYS 的 CUDA API、Kernel 和显存活动采集可用，但不等价于 NCU 的硬件性能计数器分析。
+
+## 9. V1 NSYS 分析顺序
+
+运行 `./scripts/profile_nsys.sh naive` 后依次检查：
+
+1. `cuda_gpu_kern_sum`：确认捕获 6 次 `naive_transpose_kernel`，观察平均、中位数、最小值、最大值和波动；
+2. `cuda_gpu_mem_time_sum`：确认 H2D/D2H 大小与 V0 一致，不把传输时间混入 Kernel-only 结论；
+3. `cuda_api_sum`：区分首次初始化、稳态 Launch 和同步等待；
+4. `cuda_gpu_trace`：确认默认 Stream 上 H2D、6 次 Kernel、D2H 的串行顺序。
+
+V1 当前可以形成的证据链：
+
+```text
+代码地址映射显示 V1 连续读、跨步写
+→ 同负载 CUDA Event 显示 V1 明显慢于 Copy
+→ NSYS 验证被测 Kernel、调用次数和 Device 执行时间
+```
+
+不能写成：
+
+```text
+NCU 已证明 Global Store 事务效率下降
+```
+
+因为当前环境没有取得该硬件指标。
+
+## 10. 进入 V2 前需要回答
+
+1. Naive Transpose 是读不连续还是写不连续？
+2. 为什么 V0 与 V1 必须使用相同 Shape、Block 和统计方法？
+3. 为什么 Copy 不是转置算法，却适合作为带宽参考？
+4. 为什么 NSYS 能证明 V1 更慢，却不能直接证明 Bank Conflict？
+5. 为什么 Shared Memory 可以把跨步 Global Store 改为连续写入？

@@ -5,12 +5,23 @@ set -euo pipefail
 
 # 使用绝对仓库路径，保证 CSV 总是写入当前项目的 results/raw。
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+csv_path="${repo_root}/results/raw/transpose_v1.csv"
 
-# 按提示词的正式默认值运行 20 次预热、每组 100 次 Kernel、共 5 组。
-"${repo_root}/build/transpose_bench" \
-    --kernel copy \
-    --shape 4096x4096 \
-    --warmup 20 \
-    --iterations 100 \
-    --groups 5 \
-    --csv "${repo_root}/results/raw/transpose_v0.csv"
+# 选择方阵、长条、宽条和非 32 整除大矩阵，观察 Shape 对跨步写入的影响。
+shapes=(
+    "1024x8192"
+    "8192x1024"
+    "4096x4096"
+    "4097x3073"
+)
+
+# 每个 Shape 在同一进程依次测 V0 Copy 和 V1 Naive，保持统计方法完全一致。
+for shape in "${shapes[@]}"; do
+    "${repo_root}/build/transpose_bench" \
+        --kernel all \
+        --shape "${shape}" \
+        --warmup 20 \
+        --iterations 100 \
+        --groups 5 \
+        --csv "${csv_path}"
+done

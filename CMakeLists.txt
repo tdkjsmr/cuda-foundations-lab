@@ -35,26 +35,26 @@ function(configure_cuda_target target_name)
     target_include_directories(${target_name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
     target_compile_options(${target_name} PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:-O3;-Wall;-Wextra;-Wpedantic>
-        $<$<COMPILE_LANGUAGE:CUDA>:-O3;-lineinfo;--expt-relaxed-constexpr>
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3;-lineinfo>
     )
 endfunction()
 
-add_library(transpose_v0_core OBJECT src/transpose/transpose.cu)
-target_compile_definitions(transpose_v0_core PRIVATE CUDA_FOUNDATIONS_TRANSPOSE_CORE_ONLY=1)
-configure_cuda_target(transpose_v0_core)
+add_library(transpose_core OBJECT src/transpose/transpose.cu)
+target_compile_definitions(transpose_core PRIVATE CUDA_FOUNDATIONS_TRANSPOSE_CORE_ONLY=1)
+configure_cuda_target(transpose_core)
 
-add_executable(transpose_v0 src/transpose/transpose.cu)
-configure_cuda_target(transpose_v0)
+add_executable(transpose_v1 src/transpose/transpose.cu)
+configure_cuda_target(transpose_v1)
 
 add_executable(transpose_test
     tests/transpose_test.cu
-    $<TARGET_OBJECTS:transpose_v0_core>
+    $<TARGET_OBJECTS:transpose_core>
 )
 configure_cuda_target(transpose_test)
 
 add_executable(transpose_bench
     benchmarks/transpose_bench.cu
-    $<TARGET_OBJECTS:transpose_v0_core>
+    $<TARGET_OBJECTS:transpose_core>
 )
 target_compile_definitions(
     transpose_bench
@@ -63,5 +63,5 @@ target_compile_definitions(
 configure_cuda_target(transpose_bench)
 
 if(BUILD_TESTING)
-    add_test(NAME transpose_v0_correctness COMMAND transpose_test)
+    add_test(NAME transpose_v0_v1_correctness COMMAND transpose_test)
 endif()

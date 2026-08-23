@@ -29,7 +29,7 @@ namespace {
 // 保存全部 CLI 参数；日志和 CSV 可以据此完整复现实验。
 struct Options {
     cuda_foundations::reduction::KernelVersion kernel_version =
-        cuda_foundations::reduction::KernelVersion::kFirstAdd;
+        cuda_foundations::reduction::KernelVersion::kWarpShuffle;
     std::size_t input_count = 16777219U;
     int warmup_count = 20;
     int iteration_count = 100;
@@ -88,9 +88,12 @@ Options parse_options(int argc, char** argv) {
             } else if (kernel == "first_add") {
                 options.kernel_version =
                     cuda_foundations::reduction::KernelVersion::kFirstAdd;
+            } else if (kernel == "warp_shuffle") {
+                options.kernel_version =
+                    cuda_foundations::reduction::KernelVersion::kWarpShuffle;
             } else {
                 throw std::invalid_argument(
-                    "--kernel 必须是 interleaved、sequential 或 first_add");
+                    "--kernel 必须是 interleaved、sequential、first_add 或 warp_shuffle");
             }
         } else if (argument == "--size" && index + 1 < argc) {
             options.input_count = parse_size(argv[++index], "--size");

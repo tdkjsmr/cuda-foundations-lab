@@ -6,7 +6,7 @@
 
 namespace cuda_foundations::reduction {
 
-// V0/V1/V2 固定使用 256 线程 Block，保持三个版本使用同一个线程块大小。
+// V0/V1/V2/V3 固定使用 256 线程 Block，保持四个版本使用同一个线程块大小。
 inline constexpr unsigned int kBlockSize = 256U;
 
 // 标识同一多阶段框架中实际使用的 Block 内归约算法。
@@ -14,6 +14,7 @@ enum class KernelVersion {
     kInterleaved,
     kSequential,
     kFirstAdd,
+    kWarpShuffle,
 };
 
 // 记录一次完整 GPU 多阶段归约的结果位置与结构信息。
@@ -31,7 +32,7 @@ struct ReductionLaunchInfo {
 // 返回 V0/V1 容纳第一阶段 Partial Sums 所需的 Workspace 元素数。
 std::size_t workspace_elements(std::size_t input_count);
 
-// 按版本返回 Workspace 元素数；V2 每个 Block 覆盖 512 个输入。
+// 按版本返回 Workspace 元素数；V2/V3 每个 Block 覆盖 512 个输入。
 std::size_t workspace_elements(KernelVersion version, std::size_t input_count);
 
 // 返回 V0 处理给定 N 所需的完整 GPU Kernel Launch 数。
@@ -42,6 +43,9 @@ std::size_t sequential_launch_count(std::size_t input_count);
 
 // 返回 V2 处理给定 N 所需的完整 GPU Kernel Launch 数。
 std::size_t first_add_launch_count(std::size_t input_count);
+
+// 返回 V3 处理给定 N 所需的完整 GPU Kernel Launch 数。
+std::size_t warp_shuffle_launch_count(std::size_t input_count);
 
 // 按版本返回从输入归约到一个结果所需的完整 Launch 数。
 std::size_t reduction_launch_count(KernelVersion version, std::size_t input_count);
@@ -70,7 +74,14 @@ ReductionLaunchInfo reduce_first_add(const float* device_input,
                                      std::size_t input_count,
                                      cudaStream_t stream = nullptr);
 
-// 按 version 调度 V0、V1 或 V2；测试与 Benchmark 共用同一控制路径。
+// 使用 V3 Warp Shuffle 完成完整 GPU 多阶段归约。
+ReductionLaunchInfo reduce_warp_shuffle(const float* device_input,
+                                        float* workspace_a,
+                                        float* workspace_b,
+                                        std::size_t input_count,
+                                        cudaStream_t stream = nullptr);
+
+// 按 version 调度 V0～V3；测试与 Benchmark 共用同一控制路径。
 ReductionLaunchInfo reduce(KernelVersion version,
                            const float* device_input,
                            float* workspace_a,

@@ -2,7 +2,7 @@
 
 这是 OLCF CUDA Training Series 阶段收尾项目，目标是建立“正确性、稳定测量、Profiler 证据、单变量迭代”的 CUDA 性能工程闭环。
 
-当前开发分支：`v2.2`。
+当前开发分支：`v2.3`。
 
 Transpose 子项目最终分支：`v1.3`。
 
@@ -20,7 +20,7 @@ V0 建立连续读写的实际带宽参考。V1 把连续输出写入改为跨�
 ```text
 include/                    CUDA 错误检查、Event 计时、统计和公共接口
 src/transpose/transpose.cu  V0/V1/V2/V3 Kernel、Host 启动逻辑和演示 main
-src/reduction/reduction.cu  V0/V1/V2 Kernel、GPU 多阶段控制和演示 main
+src/reduction/reduction.cu  V0/V1/V2/V3 Kernel、GPU 多阶段控制和演示 main
 tests/transpose_test.cu     CPU Reference、正确性、边界和特殊位模式测试
 tests/reduction_test.cu     规定 N、数据分布、误差与多阶段测试
 benchmarks/                 独立 Copy/Naive/Tiled/Padded 稳定态性能测量
@@ -38,11 +38,12 @@ docs/                       中文实现与性能分析报告
 - 性能：Padded 相对 Naive 加速 `2.72×–3.15×`，达到 Copy 的 `93.68%–100.31%`；
 - Profiler：V0–V3 NSYS 报告已归档；NCU 因容器权限不可采集。
 
-## Reduction V0/V1/V2 当前状态
+## Reduction V0/V1/V2/V3 当前状态
 
 - Interleaved Addressing：已保留为 V0 基线；
 - Sequential Addressing：已实现为 V1，连续前半线程参与归约；
 - First Add During Load：已实现为 V2，每线程最多先合并两个输入；
+- Warp Shuffle：已实现为 V3，最后 64 个 Partial 由首 Warp 在 Register 中完成；
 - 任意 N 和非 2 的幂：已支持；
 - GPU 多阶段归约：已支持，两块 Workspace Ping-Pong 到单个结果；
 - CPU Reference：double 串行累加；
@@ -69,8 +70,8 @@ cmake --build build -j
 ./scripts/profile_nsys.sh padded
 
 ./build/reduction --size 1000003 --pattern random
-./scripts/run_reduction_v2_benchmarks.sh
-./scripts/profile_reduction_v2_nsys.sh
+./scripts/run_reduction_v3_benchmarks.sh
+./scripts/profile_reduction_v3_nsys.sh
 ```
 
 ## 版本演进
@@ -84,6 +85,7 @@ cmake --build build -j
 | `v2.0` | Interleaved Reduction | 交错活跃线程与完整 GPU 多阶段归约基线 |
 | `v2.1` | Sequential Reduction | 连续前半线程归约，减少 Warp 分支浪费 |
 | `v2.2` | First Add During Load | 每线程合并两个输入，减少 Block 和 Partial Sums |
+| `v2.3` | Warp Shuffle Reduction | 用 Register Shuffle 完成最后一个 Warp，减少 Shared 访问与 Block 屏障 |
 
 ## 最终交付物
 
@@ -94,15 +96,16 @@ cmake --build build -j
 - [最终原始数据](results/raw/transpose_v3.csv)：四版本、四种正式 Shape；
 - `results/nsys/`：各阶段 `.nsys-rep` 与命令行 CSV 摘要。
 
-Reduction V0/V1/V2：
+Reduction V0/V1/V2/V3：
 
-- [统一源码](src/reduction/reduction.cu)：Interleaved/Sequential/First Add Kernel、GPU 多阶段 Host 控制与演示 `main()`；
+- [统一源码](src/reduction/reduction.cu)：Interleaved/Sequential/First Add/Warp Shuffle Kernel、GPU 多阶段 Host 控制与演示 `main()`；
 - [正确性测试](tests/reduction_test.cu)：全部规定 N、五类输入和误差验收；
 - [稳定 Benchmark](benchmarks/reduction_bench.cu)：完整多阶段 CUDA Event 计时；
 - [性能报告](docs/02_reduction_report.md)：算法、测试、正式数据与 NSYS 阶段分析；
 - [V0 原始数据](results/raw/reduction_v0.csv) 与 `results/nsys/reduction_v0_interleaved*`。
 - [V1 对比数据](results/raw/reduction_v1_comparison.csv) 与 `results/nsys/reduction_v1_sequential*`。
 - [V2 对比数据](results/raw/reduction_v2_comparison.csv) 与 `results/nsys/reduction_v2_first_add*`。
+- V3 正式四版本对比与 `results/nsys/reduction_v3_warp_shuffle*` 将由本分支实验生成。
 
 ## Profiler 证据边界
 
@@ -113,7 +116,7 @@ Reduction V0/V1/V2：
 ```bash
 ./scripts/profile_ncu.sh tiled
 ./scripts/profile_ncu.sh padded
-./scripts/profile_reduction_v2_ncu.sh
+./scripts/profile_reduction_v3_ncu.sh
 ```
 
 项目不会用推论或 NSYS 时间线冒充 NCU 硬件指标。

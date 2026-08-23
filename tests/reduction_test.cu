@@ -9,25 +9,43 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace {
 
-// 一个测试用例描述输入长度、数据分布和便于定位失败的名字。
+// 用 size_t 最大值表示当前用例不是 One-Hot 定位输入。
+constexpr std::size_t kNoOneHot = std::numeric_limits<std::size_t>::max();
+
+// 一个测试用例描述输入长度、数据分布、名字和可选的 One-Hot 位置。
 struct TestCase {
     std::size_t input_count;
     cuda_foundations::reduction::InputPattern pattern;
     std::string name;
+    std::size_t one_hot_index = kNoOneHot;
 };
 
 // 执行 H2D → GPU 多阶段归约 → D2H，并检查结构信息与数值误差。
 bool run_case(
     cuda_foundations::reduction::KernelVersion kernel_version,
     const TestCase& test_case) {
-    const std::vector<float> host_input = cuda_foundations::reduction::make_input(
-        test_case.input_count, test_case.pattern);
+    // 普通用例复用五种 deterministic 输入；One-Hot 用例精确定位漏加或重复加。
+    std::vector<float> host_input;
+    if (test_case.one_hot_index == kNoOneHot) {
+        host_input = cuda_foundations::reduction::make_input(
+            test_case.input_count, test_case.pattern);
+    } else {
+        // 测试描述本身若越界就立即失败，避免把坏用例误判为 Kernel 问题。
+        if (test_case.one_hot_index >= test_case.input_count) {
+            throw std::invalid_argument("One-Hot 测试位置超出输入范围");
+        }
+        // 除目标位置为 1 外全部为 0，正确归约结果必须精确为 1。
+        host_input.assign(test_case.input_count, 0.0F);
+        host_input[test_case.one_hot_index] = 1.0F;
+    }
     const cuda_foundations::reduction::CpuReference reference =
         cuda_foundations::reduction::cpu_reference(host_input);
 
@@ -102,9 +120,13 @@ bool run_case(
               << cuda_foundations::reduction::kernel_name(kernel_version) << " "
               << test_case.name
               << " N=" << test_case.input_count
-              << " pattern="
-              << cuda_foundations::reduction::pattern_name(test_case.pattern)
-              << " launches=" << launch_info.launch_count
+              << " pattern=";
+    if (test_case.one_hot_index == kNoOneHot) {
+        std::cout << cuda_foundations::reduction::pattern_name(test_case.pattern);
+    } else {
+        std::cout << "one_hot@" << test_case.one_hot_index;
+    }
+    std::cout << " launches=" << launch_info.launch_count
               << " abs_error=" << errors.absolute_error
               << " norm_error=" << errors.normalized_error << std::endl;
     return true;
@@ -115,12 +137,18 @@ bool run_case(
 int main() {
     using cuda_foundations::reduction::InputPattern;
 
-    // 文档规定的 N 覆盖 Warp、Block、非 2 的幂、非整除和大数组。
+    // 文档规定的 N 加上 64/128/512/512² 邻域，覆盖 Shared→Shuffle 与多阶段边界。
     const std::vector<std::size_t> required_sizes = {
         1U,
         31U,
         32U,
         33U,
+        63U,
+        64U,
+        65U,
+        127U,
+        128U,
+        129U,
         255U,
         256U,
         257U,
@@ -130,12 +158,15 @@ int main() {
         1023U,
         1024U,
         1025U,
+        262143U,
+        262144U,
+        262145U,
         1000003U,
         16777219U,
     };
 
     std::vector<TestCase> test_cases;
-    test_cases.reserve(required_sizes.size() + 5U);
+    test_cases.reserve(required_sizes.size() + 15U);
 
     // 每个规定 N 都使用包含正负小数的 deterministic random 分布回归。
     for (const std::size_t input_count : required_sizes) {
@@ -154,11 +185,27 @@ int main() {
     test_cases.push_back(
         {kPatternTestSize, InputPattern::kDynamicRange, "dynamic_range"});
 
-    // 三个版本运行完全相同的输入集合，防止优化破坏任一版本的边界处理。
+    // One-Hot 跨越 Warp、Shared stride、第二次加载和 Block 尾部边界。
+    constexpr std::size_t kOneHotBlockSize = 512U;
+    const std::vector<std::size_t> one_hot_positions = {
+        0U, 31U, 32U, 63U, 64U, 127U, 128U, 255U, 256U, 511U};
+    for (const std::size_t position : one_hot_positions) {
+        test_cases.push_back(
+            {kOneHotBlockSize,
+             InputPattern::kZeros,
+             "one_hot_512_at_" + std::to_string(position),
+             position});
+    }
+    // N=513 的最后一项位于第二个 Block，额外验证不完整 Block 的输入边界。
+    test_cases.push_back(
+        {513U, InputPattern::kZeros, "one_hot_last_513", 512U});
+
+    // 四个版本运行完全相同的输入集合，防止优化破坏任一版本的边界处理。
     const std::vector<cuda_foundations::reduction::KernelVersion> versions = {
         cuda_foundations::reduction::KernelVersion::kInterleaved,
         cuda_foundations::reduction::KernelVersion::kSequential,
         cuda_foundations::reduction::KernelVersion::kFirstAdd,
+        cuda_foundations::reduction::KernelVersion::kWarpShuffle,
     };
 
     bool all_passed = true;
@@ -169,10 +216,10 @@ int main() {
     }
 
     if (!all_passed) {
-        std::cerr << "Reduction V0/V1/V2 正确性或边界测试失败" << std::endl;
+        std::cerr << "Reduction V0/V1/V2/V3 正确性或边界测试失败" << std::endl;
         return EXIT_FAILURE;
     }
 
-    std::cout << "Reduction V0/V1/V2 全部正确性、边界、误差和多阶段测试通过" << std::endl;
+    std::cout << "Reduction V0/V1/V2/V3 全部正确性、边界、误差和多阶段测试通过" << std::endl;
     return EXIT_SUCCESS;
 }

@@ -129,18 +129,78 @@ __global__ void first_add_reduction_kernel(const float* input,
     }
 }
 
+// V3 保留 First Add，只把最后一个 Warp 的归约改为 Register Shuffle。
+__global__ void warp_shuffle_reduction_kernel(const float* input,
+                                               float* partial_sums,
+                                               std::size_t input_count) {
+    // Block 前半段仍使用 256 个 FP32 Shared Memory 槽位。
+    __shared__ float shared_values[kBlockSize];
+
+    // 首 Warp 的 32 个 Lane 无条件参与每次 Shuffle，因此使用完整 Warp mask。
+    constexpr unsigned int kFullWarpMask = 0xFFFFFFFFU;
+
+    const unsigned int thread_index = threadIdx.x;
+    // 与 V2 相同，一个 Block 读取两段连续的 256 元素区域。
+    const std::size_t block_input_begin =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x * 2U;
+    const std::size_t first_index = block_input_begin + thread_index;
+    const std::size_t second_index = first_index + blockDim.x;
+
+    // 每个线程先在 Register 中合并最多两个有效输入；越界元素贡献 0。
+    float thread_sum = 0.0F;
+    if (first_index < input_count) {
+        thread_sum = input[first_index];
+    }
+    if (second_index < input_count) {
+        thread_sum += input[second_index];
+    }
+    shared_values[thread_index] = thread_sum;
+
+    // Block 内所有 Shared Memory 槽位初始化完成后才能开始跨 Warp 归约。
+    __syncthreads();
+
+    // 只执行 stride=128 和 64，把 256 个值缩减到 shared[0..63]。
+    for (unsigned int stride = blockDim.x / 2U; stride > warpSize; stride /= 2U) {
+        if (thread_index < stride) {
+            shared_values[thread_index] += shared_values[thread_index + stride];
+        }
+        // stride=64 后的屏障保证首 Warp 能看到第二个 Warp 写入的最终结果。
+        __syncthreads();
+    }
+
+    // 只有首 Warp 参与剩余 64 个值的归约；其 32 个 Lane 全部存在并执行此分支。
+    if (thread_index < warpSize) {
+        // 每个 Lane 先合并 shared[lane] 与 shared[lane+32]，等价于 stride=32。
+        float warp_sum =
+            shared_values[thread_index] + shared_values[thread_index + warpSize];
+
+        // Shuffle 直接交换 Register 值，offset 依次完成 16、8、4、2、1 归约。
+#pragma unroll
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            // mask 内全部 Lane 必须以同一 mask 调用 intrinsic，不能放入 lane<offset 分支。
+            warp_sum += __shfl_down_sync(kFullWarpMask, warp_sum, offset);
+        }
+
+        // Shuffle 后完整 Block Sum 位于首 Warp 的 Lane 0。
+        if (thread_index == 0U) {
+            partial_sums[blockIdx.x] = warp_sum;
+        }
+    }
+}
+
 std::size_t workspace_elements(KernelVersion version, std::size_t input_count) {
     if (input_count == 0U) {
         throw std::invalid_argument("Reduction 输入元素数必须大于 0");
     }
 
-    // V0/V1 每 Block 覆盖 256 个元素，V2 的 First Add 覆盖 512 个。
+    // V0/V1 每 Block 覆盖 256 个元素，V2/V3 的 First Add 覆盖 512 个。
     std::size_t elements_per_block = kBlockSize;
     switch (version) {
         case KernelVersion::kInterleaved:
         case KernelVersion::kSequential:
             break;
         case KernelVersion::kFirstAdd:
+        case KernelVersion::kWarpShuffle:
             elements_per_block = static_cast<std::size_t>(kBlockSize) * 2U;
             break;
         default:
@@ -184,6 +244,10 @@ std::size_t first_add_launch_count(std::size_t input_count) {
     return reduction_launch_count(KernelVersion::kFirstAdd, input_count);
 }
 
+std::size_t warp_shuffle_launch_count(std::size_t input_count) {
+    return reduction_launch_count(KernelVersion::kWarpShuffle, input_count);
+}
+
 const char* kernel_name(KernelVersion version) {
     switch (version) {
         case KernelVersion::kInterleaved:
@@ -192,6 +256,8 @@ const char* kernel_name(KernelVersion version) {
             return "sequential_v1";
         case KernelVersion::kFirstAdd:
             return "first_add_v2";
+        case KernelVersion::kWarpShuffle:
+            return "warp_shuffle_v3";
     }
     throw std::invalid_argument("未知 Reduction Kernel 版本");
 }
@@ -252,7 +318,25 @@ void launch_first_add_stage(const float* device_input,
     CUDA_CHECK(cudaGetLastError());
 }
 
-// 只在 Host 端选择 Kernel；三个版本共享同一个多阶段调度框架。
+// V3 与 V2 使用相同 Grid；只替换 Block 内最后一个 Warp 的执行方式。
+void launch_warp_shuffle_stage(const float* device_input,
+                               float* device_output,
+                               std::size_t input_count,
+                               cudaStream_t stream) {
+    const std::size_t partial_count =
+        workspace_elements(KernelVersion::kWarpShuffle, input_count);
+    if (partial_count > std::numeric_limits<unsigned int>::max()) {
+        throw std::overflow_error("Reduction 第一维 Grid 超出 dim3 表示范围");
+    }
+
+    const dim3 block(kBlockSize, 1U, 1U);
+    const dim3 grid(static_cast<unsigned int>(partial_count), 1U, 1U);
+    warp_shuffle_reduction_kernel<<<grid, block, 0U, stream>>>(
+        device_input, device_output, input_count);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// 只在 Host 端选择 Kernel；四个版本共享同一个多阶段调度框架。
 void launch_stage(KernelVersion version,
                   const float* device_input,
                   float* device_output,
@@ -267,6 +351,9 @@ void launch_stage(KernelVersion version,
             return;
         case KernelVersion::kFirstAdd:
             launch_first_add_stage(device_input, device_output, input_count, stream);
+            return;
+        case KernelVersion::kWarpShuffle:
+            launch_warp_shuffle_stage(device_input, device_output, input_count, stream);
             return;
     }
     throw std::invalid_argument("未知 Reduction Kernel 版本");
@@ -295,7 +382,7 @@ ReductionLaunchInfo reduce(KernelVersion version,
     std::size_t current_count = input_count;
     std::size_t launch_count = 0U;
 
-    // V0/V1 每阶段按 256 缩小；V2 每阶段按 512 缩小。
+    // V0/V1 每阶段按 256 缩小；V2/V3 每阶段按 512 缩小。
     do {
         launch_stage(version, current_input, current_output, current_count, stream);
         current_count = workspace_elements(version, current_count);
@@ -352,6 +439,19 @@ ReductionLaunchInfo reduce_first_add(const float* device_input,
                   stream);
 }
 
+ReductionLaunchInfo reduce_warp_shuffle(const float* device_input,
+                                        float* workspace_a,
+                                        float* workspace_b,
+                                        std::size_t input_count,
+                                        cudaStream_t stream) {
+    return reduce(KernelVersion::kWarpShuffle,
+                  device_input,
+                  workspace_a,
+                  workspace_b,
+                  input_count,
+                  stream);
+}
+
 }  // namespace cuda_foundations::reduction
 
 #ifndef CUDA_FOUNDATIONS_REDUCTION_CORE_ONLY
@@ -362,7 +462,7 @@ namespace {
 struct DemoOptions {
     std::size_t input_count = 1000003U;
     cuda_foundations::reduction::KernelVersion kernel_version =
-        cuda_foundations::reduction::KernelVersion::kFirstAdd;
+        cuda_foundations::reduction::KernelVersion::kWarpShuffle;
     cuda_foundations::reduction::InputPattern pattern =
         cuda_foundations::reduction::InputPattern::kRandom;
 };
@@ -397,9 +497,12 @@ DemoOptions parse_options(int argc, char** argv) {
             } else if (kernel == "first_add") {
                 options.kernel_version =
                     cuda_foundations::reduction::KernelVersion::kFirstAdd;
+            } else if (kernel == "warp_shuffle") {
+                options.kernel_version =
+                    cuda_foundations::reduction::KernelVersion::kWarpShuffle;
             } else {
                 throw std::invalid_argument(
-                    "--kernel 必须是 interleaved、sequential 或 first_add");
+                    "--kernel 必须是 interleaved、sequential、first_add 或 warp_shuffle");
             }
         } else if (argument == "--size" && index + 1 < argc) {
             options.input_count = parse_size(argv[++index]);

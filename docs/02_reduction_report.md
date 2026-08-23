@@ -2,8 +2,8 @@
 
 ## 0. 当前版本与证据边界
 
-- Git 分支：`v2.2`
-- 当前实现：V0 Interleaved + V1 Sequential + V2 First Add During Load
+- Git 分支：`v2.3`
+- 当前实现：V0 Interleaved + V1 Sequential + V2 First Add During Load + V3 Warp Shuffle
 - Block：256 threads
 - 数据类型：FP32
 - CPU Reference：double 串行累加
@@ -59,19 +59,19 @@ compute-sanitizer --tool synccheck ./build/reduction_test
   --iterations 100 \
   --groups 5
 
-./scripts/run_reduction_benchmarks.sh
+./scripts/run_reduction_v3_benchmarks.sh
 ```
 
 ### 1.5 Profiler
 
 ```bash
-./scripts/profile_reduction_nsys.sh
+./scripts/profile_reduction_v3_nsys.sh
 ```
 
 未来在允许性能计数器的环境运行：
 
 ```bash
-./scripts/profile_reduction_ncu.sh
+./scripts/profile_reduction_v3_ncu.sh
 ```
 
 ## 2. 文件与调用关系
@@ -208,7 +208,9 @@ absolute_error <= tolerance
 1,000,003, 16,777,219
 ```
 
-它们覆盖小于/等于/超过 Warp，Block 边界，非 2 的幂，非 Block 整除和大规模多阶段归约。
+另加入 `63/64/65`、`127/128/129` 和 `262143/262144/262145`，直接覆盖 Shared→Shuffle 边界及 `512²±1` 的多阶段 Launch 临界。另有 11 个 One-Hot 用例覆盖位置 `0/31/32/63/64/127/128/255/256/511/512`，精确暴露漏加或重复加。
+
+四版本共执行 `39 × 4 = 156` 个 Reduction 用例。原规定 N 覆盖小于/等于/超过 Warp，Block 边界，非 2 的幂，非 Block 整除和大规模多阶段归约。
 
 输入分布：
 
@@ -222,7 +224,7 @@ dynamic_range
 
 全 1 只用于其中一个用例，不作为唯一正确性依据。
 
-本轮 V0/V1/V2 实际检查结果：
+本轮 V0/V1/V2/V3 实际检查结果：
 
 ```text
 CTest：2/2 PASS（Transpose + Reduction）
@@ -538,12 +540,102 @@ NSYS 同时记录 V2 为 16 registers/thread、1,024 B static shared memory，�
 
 NSYS 可以证明 Grid、Launch、Kernel 时间和传输结构变化，但不能给出实际 DRAM Throughput、Achieved Occupancy 或主要 Warp Stall。NCU 脚本已准备，当前容器仍因 `ERR_NVGPUCTRPERM` 无法采集硬件计数器。
 
-## 16. 进入 V3 前需要回答
+## 16. V3 Warp Shuffle
 
-1. First Add 为什么能让首阶段 Grid 约减半？
-2. 两次 Global Load 是否仍然合并？
-3. 为什么两个输入索引必须分别做边界检查？
-4. 为什么 V2 的 Shared Memory 容量没有增加到 512 个 float？
-5. 哪些 N 会因为 V2 而减少完整归约的 Launch 数？
-6. V2 为什么可能在很小的 N 上收益有限甚至变慢？
-7. 下一轮 Warp Shuffle 将减少哪些 Shared Memory 操作和 Block 屏障？
+### 16.1 本轮唯一主要变化
+
+V3 完整保留 V2 的 First Add 加载、`Block=256`、每 Block 覆盖 512 个输入、Grid、Workspace 和 GPU 多阶段 Ping-Pong。唯一主要变化是 Block 内最后 64 个 Partial Sum 的归约方式：
+
+```text
+V2：256 → 128 → 64 → 32 → 16 → 8 → 4 → 2 → 1，全部经 Shared Memory
+V3：256 → 128 → 64 经 Shared Memory；64 → 32 → 16 → 8 → 4 → 2 → 1 经 Register + Shuffle
+```
+
+核心数据流：
+
+```cpp
+for (unsigned int stride = blockDim.x / 2U; stride > warpSize; stride /= 2U) {
+    if (threadIdx.x < stride) {
+        shared[threadIdx.x] += shared[threadIdx.x + stride];
+    }
+    __syncthreads();
+}
+
+if (threadIdx.x < warpSize) {
+    float warp_sum = shared[threadIdx.x] + shared[threadIdx.x + warpSize];
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        warp_sum += __shfl_down_sync(0xFFFFFFFFU, warp_sum, offset);
+    }
+    if (threadIdx.x == 0U) {
+        partial_sums[blockIdx.x] = warp_sum;
+    }
+}
+```
+
+Shared 循环必须使用 `stride > warpSize`，只执行 128 和 64。若写成 `>=`，就会先在 Shared 中执行 stride=32，再由 `shared[lane] + shared[lane+32]` 重复计算。
+
+### 16.2 屏障与内存可见性
+
+V2 每个 Block 有初始化后的 1 次屏障和 8 轮 Shared 归约屏障，共 9 次 `__syncthreads()`。V3 只有：
+
+```text
+初始化后：1 次
+stride=128 后：1 次
+stride=64 后：1 次
+合计：3 次
+```
+
+因此理论上每 Block 减少 6 次 Block 级屏障，并移除最后 5 轮 Shared Memory 读改写。stride=64 后的屏障不能删除，也不能换成 `__syncwarp()`：thread 32..63 属于第二个 Warp，它们会写 `shared[32..63]`；随后首 Warp 要读取这些槽位，必须建立跨 Warp 的 Block 级同步与可见性。进入 Register Shuffle 后不再存在 Shared Memory 跨线程依赖，不需要最终 `__syncthreads()`。
+
+### 16.3 Shuffle mask 的正确性证明
+
+V3 使用固定 `0xFFFFFFFFU`。这里的 mask 表示参与 Shuffle intrinsic 的线程集合，不是有效输入元素集合。即使 `N<32`，Block 仍固定启动 256 个线程；越界线程不会提前返回，而是把加法单位元 0 写入 Shared Memory。最终首 Warp 的全部 32 个 Lane 都进入同一分支，并在每轮以相同 mask 无条件调用 `__shfl_down_sync`，所以 full mask 合法。
+
+以下写法被明确禁止：
+
+- 越界线程提前 `return`，因为它会破坏后续 Block 屏障并可能使 full mask 非法；
+- 只让有效输入 Lane 参与 Shuffle；
+- 把 `__shfl_down_sync` 放进 `lane < offset` 分支；
+- 只让 Lane 0 调用 Shuffle；
+- 用瞬时 `__activemask()` 推断原始输入分支的成员。
+
+标准的无条件 Shuffle 加法中，高编号 Lane 后期的中间值不再有完整归约语义，但这些值不会回流污染 Lane 0。
+
+### 16.4 边界、多阶段与结构不变量
+
+V3 两次 Global Load 仍分别检查 `first_index < N` 和 `second_index < N`，所以 `N=1/31/32/33` 与最后一个不完整 Block 都由 0 填充安全处理。V2/V3 的 Workspace 都是 `ceil(N/512)`，后续每阶段也继续使用 512 覆盖率。
+
+新增的 `512²±1` 回归验证：
+
+```text
+N=262143：V3 launches=2
+N=262144：V3 launches=2
+N=262145：V3 launches=3
+```
+
+### 16.5 验证与性能命令
+
+```bash
+./build/reduction --kernel warp_shuffle --size 1000003 --pattern random
+./build/reduction_test
+ctest --test-dir build --output-on-failure
+
+compute-sanitizer --tool memcheck ./build/reduction_test
+compute-sanitizer --tool racecheck ./build/reduction_test
+compute-sanitizer --tool synccheck ./build/reduction_test
+
+./scripts/run_reduction_v3_benchmarks.sh
+./scripts/profile_reduction_v3_nsys.sh
+```
+
+本轮正式性能采集前的结构验收结果：
+
+```text
+Reduction 用例：156/156 PASS
+CTest：2/2 PASS
+memcheck：0 errors
+racecheck：0 hazards，0 errors，0 warnings
+synccheck：0 errors
+```
+
+正式 CUDA Event 四版本对比与 NSYS 阶段数据将在固定本轮源码 commit 后采集，避免二进制与源码证据不一致。NCU 脚本已提供，但当前容器仍不能访问 GPU Performance Counters。

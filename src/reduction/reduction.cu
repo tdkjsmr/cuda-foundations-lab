@@ -88,35 +88,100 @@ __global__ void sequential_reduction_kernel(const float* input,
     }
 }
 
-std::size_t workspace_elements(std::size_t input_count) {
+// V2 让一个线程先在 Register 中合并两个 Global Memory 元素。
+__global__ void first_add_reduction_kernel(const float* input,
+                                           float* partial_sums,
+                                           std::size_t input_count) {
+    // 线程合并两个元素后，Block 内仍只需 256 个 Shared Memory 槽位。
+    __shared__ float shared_values[kBlockSize];
+
+    const unsigned int thread_index = threadIdx.x;
+    // 一个 Block 覆盖连续的 2 * blockDim.x 个输入元素。
+    const std::size_t block_input_begin =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x * 2U;
+    const std::size_t first_index = block_input_begin + thread_index;
+    const std::size_t second_index = first_index + blockDim.x;
+
+    // 两次读取分别做独立边界判断，支持任意 N 和最后一个不完整 Block。
+    float thread_sum = 0.0F;
+    if (first_index < input_count) {
+        thread_sum = input[first_index];
+    }
+    if (second_index < input_count) {
+        thread_sum += input[second_index];
+    }
+    shared_values[thread_index] = thread_sum;
+
+    // 所有线程完成 First Add 并写入 Shared Memory 后再开始 Block 内归约。
+    __syncthreads();
+
+    // 后续保持 V1 Sequential Addressing，确保本轮只改变加载阶段。
+    for (unsigned int stride = blockDim.x / 2U; stride > 0U; stride /= 2U) {
+        if (thread_index < stride) {
+            shared_values[thread_index] += shared_values[thread_index + stride];
+        }
+        __syncthreads();
+    }
+
+    // 一个 Block 现在最多汇总 512 个输入，但仍只输出一个 Partial Sum。
+    if (thread_index == 0U) {
+        partial_sums[blockIdx.x] = shared_values[0];
+    }
+}
+
+std::size_t workspace_elements(KernelVersion version, std::size_t input_count) {
     if (input_count == 0U) {
         throw std::invalid_argument("Reduction 输入元素数必须大于 0");
     }
 
-    // 使用 1 + (N - 1) / block 避免 N + block - 1 发生 size_t 溢出。
-    return 1U + (input_count - 1U) / kBlockSize;
+    // V0/V1 每 Block 覆盖 256 个元素，V2 的 First Add 覆盖 512 个。
+    std::size_t elements_per_block = kBlockSize;
+    switch (version) {
+        case KernelVersion::kInterleaved:
+        case KernelVersion::kSequential:
+            break;
+        case KernelVersion::kFirstAdd:
+            elements_per_block = static_cast<std::size_t>(kBlockSize) * 2U;
+            break;
+        default:
+            throw std::invalid_argument("未知 Reduction Kernel 版本");
+    }
+
+    // 使用 1 + (N - 1) / coverage，避免 N + coverage - 1 溢出。
+    return 1U + (input_count - 1U) / elements_per_block;
 }
 
-std::size_t interleaved_launch_count(std::size_t input_count) {
+std::size_t workspace_elements(std::size_t input_count) {
+    // 旧接口保持 V0/V1 的 256 元素覆盖语义。
+    return workspace_elements(KernelVersion::kInterleaved, input_count);
+}
+
+std::size_t reduction_launch_count(KernelVersion version,
+                                   std::size_t input_count) {
     if (input_count == 0U) {
         throw std::invalid_argument("Reduction 输入元素数必须大于 0");
     }
 
     std::size_t launch_count = 0U;
     std::size_t current_count = input_count;
-
-    // N=1 也执行一次 Kernel，保持所有输入规模都有统一的 Device 归约路径。
+    // 每一阶段都使用所选版本的元素覆盖率，直到 Device 上只剩一个结果。
     do {
-        current_count = workspace_elements(current_count);
+        current_count = workspace_elements(version, current_count);
         ++launch_count;
     } while (current_count > 1U);
-
     return launch_count;
 }
 
+std::size_t interleaved_launch_count(std::size_t input_count) {
+    return reduction_launch_count(KernelVersion::kInterleaved, input_count);
+}
+
 std::size_t sequential_launch_count(std::size_t input_count) {
-    // 两版本每个 Block 都只处理 256 个元素，因此多阶段 Launch 数完全相同。
-    return interleaved_launch_count(input_count);
+    return reduction_launch_count(KernelVersion::kSequential, input_count);
+}
+
+std::size_t first_add_launch_count(std::size_t input_count) {
+    return reduction_launch_count(KernelVersion::kFirstAdd, input_count);
 }
 
 const char* kernel_name(KernelVersion version) {
@@ -125,6 +190,8 @@ const char* kernel_name(KernelVersion version) {
             return "interleaved_v0";
         case KernelVersion::kSequential:
             return "sequential_v1";
+        case KernelVersion::kFirstAdd:
+            return "first_add_v2";
     }
     throw std::invalid_argument("未知 Reduction Kernel 版本");
 }
@@ -167,7 +234,25 @@ void launch_sequential_stage(const float* device_input,
     CUDA_CHECK(cudaGetLastError());
 }
 
-// 只在 Host 端选择 Kernel；两个版本共享完全相同的多阶段调度逻辑。
+// V2 的 Grid.x 按 ceil(N / 512) 计算，Block 和 Shared Memory 容量不变。
+void launch_first_add_stage(const float* device_input,
+                            float* device_output,
+                            std::size_t input_count,
+                            cudaStream_t stream) {
+    const std::size_t partial_count =
+        workspace_elements(KernelVersion::kFirstAdd, input_count);
+    if (partial_count > std::numeric_limits<unsigned int>::max()) {
+        throw std::overflow_error("Reduction 第一维 Grid 超出 dim3 表示范围");
+    }
+
+    const dim3 block(kBlockSize, 1U, 1U);
+    const dim3 grid(static_cast<unsigned int>(partial_count), 1U, 1U);
+    first_add_reduction_kernel<<<grid, block, 0U, stream>>>(
+        device_input, device_output, input_count);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// 只在 Host 端选择 Kernel；三个版本共享同一个多阶段调度框架。
 void launch_stage(KernelVersion version,
                   const float* device_input,
                   float* device_output,
@@ -179,6 +264,9 @@ void launch_stage(KernelVersion version,
             return;
         case KernelVersion::kSequential:
             launch_sequential_stage(device_input, device_output, input_count, stream);
+            return;
+        case KernelVersion::kFirstAdd:
+            launch_first_add_stage(device_input, device_output, input_count, stream);
             return;
     }
     throw std::invalid_argument("未知 Reduction Kernel 版本");
@@ -200,16 +288,17 @@ ReductionLaunchInfo reduce(KernelVersion version,
         throw std::invalid_argument("Reduction 输入元素数必须大于 0");
     }
 
-    const std::size_t first_stage_partial_count = workspace_elements(input_count);
+    const std::size_t first_stage_partial_count =
+        workspace_elements(version, input_count);
     const float* current_input = device_input;
     float* current_output = workspace_a;
     std::size_t current_count = input_count;
     std::size_t launch_count = 0U;
 
-    // 每个阶段把 current_count 缩小为 ceil(current_count / 256)。
+    // V0/V1 每阶段按 256 缩小；V2 每阶段按 512 缩小。
     do {
         launch_stage(version, current_input, current_output, current_count, stream);
-        current_count = workspace_elements(current_count);
+        current_count = workspace_elements(version, current_count);
         ++launch_count;
 
         // 当前输出只剩一个元素时，它就是最终 Device 结果。
@@ -250,6 +339,19 @@ ReductionLaunchInfo reduce_sequential(const float* device_input,
                   stream);
 }
 
+ReductionLaunchInfo reduce_first_add(const float* device_input,
+                                     float* workspace_a,
+                                     float* workspace_b,
+                                     std::size_t input_count,
+                                     cudaStream_t stream) {
+    return reduce(KernelVersion::kFirstAdd,
+                  device_input,
+                  workspace_a,
+                  workspace_b,
+                  input_count,
+                  stream);
+}
+
 }  // namespace cuda_foundations::reduction
 
 #ifndef CUDA_FOUNDATIONS_REDUCTION_CORE_ONLY
@@ -260,7 +362,7 @@ namespace {
 struct DemoOptions {
     std::size_t input_count = 1000003U;
     cuda_foundations::reduction::KernelVersion kernel_version =
-        cuda_foundations::reduction::KernelVersion::kSequential;
+        cuda_foundations::reduction::KernelVersion::kFirstAdd;
     cuda_foundations::reduction::InputPattern pattern =
         cuda_foundations::reduction::InputPattern::kRandom;
 };
@@ -292,9 +394,12 @@ DemoOptions parse_options(int argc, char** argv) {
             } else if (kernel == "sequential") {
                 options.kernel_version =
                     cuda_foundations::reduction::KernelVersion::kSequential;
+            } else if (kernel == "first_add") {
+                options.kernel_version =
+                    cuda_foundations::reduction::KernelVersion::kFirstAdd;
             } else {
                 throw std::invalid_argument(
-                    "--kernel 必须是 interleaved 或 sequential");
+                    "--kernel 必须是 interleaved、sequential 或 first_add");
             }
         } else if (argument == "--size" && index + 1 < argc) {
             options.input_count = parse_size(argv[++index]);
@@ -323,7 +428,8 @@ int main(int argc, char** argv) {
         const std::size_t input_bytes =
             cuda_foundations::test::checked_float_byte_count(options.input_count);
         const std::size_t workspace_count =
-            cuda_foundations::reduction::workspace_elements(options.input_count);
+            cuda_foundations::reduction::workspace_elements(
+                options.kernel_version, options.input_count);
         const std::size_t workspace_bytes =
             cuda_foundations::test::checked_float_byte_count(workspace_count);
 

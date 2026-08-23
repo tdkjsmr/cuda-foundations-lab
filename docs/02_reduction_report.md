@@ -2,8 +2,8 @@
 
 ## 0. 当前版本与证据边界
 
-- Git 分支：`v2.1`
-- 当前实现：V0 Interleaved + V1 Sequential Addressing
+- Git 分支：`v2.2`
+- 当前实现：V0 Interleaved + V1 Sequential + V2 First Add During Load
 - Block：256 threads
 - 数据类型：FP32
 - CPU Reference：double 串行累加
@@ -203,6 +203,7 @@ absolute_error <= tolerance
 ```text
 1, 31, 32, 33,
 255, 256, 257,
+511, 512, 513,
 1023, 1024, 1025,
 1,000,003, 16,777,219
 ```
@@ -221,7 +222,7 @@ dynamic_range
 
 全 1 只用于其中一个用例，不作为唯一正确性依据。
 
-本轮 V0/V1 实际检查结果：
+本轮 V0/V1/V2 实际检查结果：
 
 ```text
 CTest：2/2 PASS（Transpose + Reduction）
@@ -409,11 +410,94 @@ V1 仍只有一次约 4 MB H2D 和一次 4 B D2H，中间 Partial Sums 没有回
 
 结论边界：源码与性能数据符合“Sequential 减少 Warp 内无效分支工作”的假设，但 NSYS 不提供 Branch Efficiency、Warp Stall、Achieved Occupancy 或 DRAM Throughput。当前 Docker 无 NCU 计数器权限，因此不把这一因果解释写成已由硬件计数器证明的事实。
 
-## 13. 进入 V2 前需要回答
+## 13. V2 First Add During Load
 
-1. V0 和 V1 每轮分别有哪些线程活跃？
-2. 为什么 V1 的活跃线程更适合 Warp 的 SIMT 执行？
-3. V1 是否减少了同步次数、Launch 次数或 Shared Memory 容量？
-4. 为什么 `thread_index + stride` 对 256 线程 Block 始终合法？
-5. NSYS 能验证 V1 的哪些结构事实，不能验证哪些 Warp 行为？
-6. 下一轮每线程加载两个元素为什么会减少首阶段 Block 数？
+### 13.1 本轮唯一主要变化
+
+V2 保留 V1 的 Sequential Shared Memory Reduction，只修改每个线程写入 Shared Memory 前的加载逻辑：
+
+```cpp
+first_index = blockIdx.x * (2 * blockDim.x) + threadIdx.x;
+second_index = first_index + blockDim.x;
+
+float thread_sum = 0.0F;
+if (first_index < N) {
+    thread_sum = input[first_index];
+}
+if (second_index < N) {
+    thread_sum += input[second_index];
+}
+shared[threadIdx.x] = thread_sum;
+```
+
+因此一个 256 线程 Block 从最多处理 256 个输入变为最多处理 512 个输入：
+
+```text
+V1 first-stage grid = ceil(N / 256)
+V2 first-stage grid = ceil(N / 512)
+```
+
+两段加载各自连续：同一 Warp 的第一次读取访问连续地址，第二次读取也访问另一段连续地址。两个索引分别检查边界，最后一个不完整 Block 不会越界；不存在的元素以加法单位元 0 参与。
+
+### 13.2 多阶段结构变化
+
+对于 `N=1,000,003`：
+
+```text
+V1：1,000,003 → 3,907 → 16 → 1（3 launches）
+V2：1,000,003 → 1,954 → 4 → 1（3 launches）
+```
+
+对于 `N=16,777,219`：
+
+```text
+V1：16,777,219 → 65,537 → 257 → 2 → 1（4 launches）
+V2：16,777,219 → 32,769 → 65 → 1（3 launches）
+```
+
+V2 不仅让第一阶段 Block 数约减半；所有后续阶段也继续使用 512 元素覆盖率。Workspace 按所选版本精确分配，V2 不再沿用 V1 的 `ceil(N/256)` 容量。
+
+### 13.3 保持不变的条件
+
+```text
+Block = 256 threads
+Shared Memory = 256 × sizeof(float) = 1,024 B
+Block 内仍为 Sequential Addressing
+每轮仍有一次 __syncthreads()
+原始输入总读取量仍为 N × sizeof(float)
+CPU double Reference、误差阈值与 CUDA Event 计时语义不变
+```
+
+因此本轮实验变量是“每线程在加载阶段合并两个元素”，其直接结构后果是 Block、Partial Sum 和部分规模下的 Launch 数减少。
+
+## 14. V2 测试与性能命令
+
+除题目规定的 12 个 N 外，额外加入 `511/512/513`，分别覆盖 First Add Block 容量的前一项、精确边界和后一项。
+
+```bash
+./build/reduction --kernel first_add --size 513 --pattern random
+./build/reduction_test
+
+compute-sanitizer --tool memcheck ./build/reduction_test
+compute-sanitizer --tool racecheck ./build/reduction_test
+compute-sanitizer --tool synccheck ./build/reduction_test
+
+./scripts/run_reduction_v2_benchmarks.sh
+./scripts/profile_reduction_v2_nsys.sh
+```
+
+正式 CSV 对 15 个 N 依次运行 Interleaved、Sequential 和 First Add，共 45 条记录，统计语义统一为 `20 × 100 × 5`。
+
+## 15. V2 正式结果与 NSYS 证据
+
+代码提交并重新构建后填写 `results/raw/reduction_v2_comparison.csv` 和 `results/nsys/reduction_v2_first_add*`。
+
+## 16. 进入 V3 前需要回答
+
+1. First Add 为什么能让首阶段 Grid 约减半？
+2. 两次 Global Load 是否仍然合并？
+3. 为什么两个输入索引必须分别做边界检查？
+4. 为什么 V2 的 Shared Memory 容量没有增加到 512 个 float？
+5. 哪些 N 会因为 V2 而减少完整归约的 Launch 数？
+6. V2 为什么可能在很小的 N 上收益有限甚至变慢？
+7. 下一轮 Warp Shuffle 将减少哪些 Shared Memory 操作和 Block 屏障？

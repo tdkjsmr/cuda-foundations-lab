@@ -29,7 +29,7 @@ namespace {
 // 保存全部 CLI 参数；日志和 CSV 可以据此完整复现实验。
 struct Options {
     cuda_foundations::reduction::KernelVersion kernel_version =
-        cuda_foundations::reduction::KernelVersion::kSequential;
+        cuda_foundations::reduction::KernelVersion::kFirstAdd;
     std::size_t input_count = 16777219U;
     int warmup_count = 20;
     int iteration_count = 100;
@@ -85,9 +85,12 @@ Options parse_options(int argc, char** argv) {
             } else if (kernel == "sequential") {
                 options.kernel_version =
                     cuda_foundations::reduction::KernelVersion::kSequential;
+            } else if (kernel == "first_add") {
+                options.kernel_version =
+                    cuda_foundations::reduction::KernelVersion::kFirstAdd;
             } else {
                 throw std::invalid_argument(
-                    "--kernel 必须是 interleaved 或 sequential");
+                    "--kernel 必须是 interleaved、sequential 或 first_add");
             }
         } else if (argument == "--size" && index + 1 < argc) {
             options.input_count = parse_size(argv[++index], "--size");
@@ -284,7 +287,8 @@ int main(int argc, char** argv) {
         const std::size_t input_bytes =
             cuda_foundations::test::checked_float_byte_count(options.input_count);
         const std::size_t workspace_count =
-            cuda_foundations::reduction::workspace_elements(options.input_count);
+            cuda_foundations::reduction::workspace_elements(
+                options.kernel_version, options.input_count);
         const std::size_t workspace_bytes =
             cuda_foundations::test::checked_float_byte_count(workspace_count);
 

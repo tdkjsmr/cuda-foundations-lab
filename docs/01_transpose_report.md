@@ -312,14 +312,27 @@ V0 Smoke Report 成功捕获：
 
 这证明 NSYS 的 CUDA API、Kernel 和显存活动采集可用，但不等价于 NCU 的硬件性能计数器分析。
 
-## 9. V1 NSYS 分析顺序
+## 9. V1 NSYS 实测与分析顺序
 
-运行 `./scripts/profile_nsys.sh naive` 后依次检查：
+2026-08-23 运行 `./scripts/profile_nsys.sh naive` 得到 `results/nsys/transpose_v1_naive.nsys-rep`。该次配置是 `4096×4096`、Block `(32, 8)`、5 次预热和 1 次正式计时；NSYS 共捕获 6 次 Kernel。
+
+实测数据：
+
+- `cuda_gpu_kern_sum`：6 次 `naive_transpose_kernel` 平均 `510.384 us`，中位数 `510.257 us`，最小 `509.984 us`，最大 `510.912 us`，标准差约 `0.358 us`；
+- CUDA Event 记录的唯一正式 Launch 为 `516.416 us`，有效带宽 `259.902 GB/s`；
+- `cuda_gpu_mem_time_sum`：H2D `6.201 ms`，D2H `7.233 ms`，两者各搬运 `67.109 MB`；
+- `cuda_api_sum`：2 次 `cudaMalloc` 合计约 `161.412 ms`，6 次 `cudaLaunchKernel` 合计约 `166.070 us`，`cudaEventSynchronize` 约 `512.230 us`。
+
+与无 Profiler 的正式 P50 `452.833 us` 相比，NSYS 下的单次 Event 结果高约 14%。因此 `.nsys-rep` 用于验证调用对象、Launch 数量、时序和同步边界，正式性能值仍以无 Profiler 的 5 组 Benchmark 为准。
+
+阅读 NSYS 时依次检查：
 
 1. `cuda_gpu_kern_sum`：确认捕获 6 次 `naive_transpose_kernel`，观察平均、中位数、最小值、最大值和波动；
 2. `cuda_gpu_mem_time_sum`：确认 H2D/D2H 大小与 V0 一致，不把传输时间混入 Kernel-only 结论；
 3. `cuda_api_sum`：区分首次初始化、稳态 Launch 和同步等待；
 4. `cuda_gpu_trace`：确认默认 Stream 上 H2D、6 次 Kernel、D2H 的串行顺序。
+
+`cudaMalloc` 在 API 汇总中占比很高，但它是计时前的一次性初始化；H2D/D2H 也不在 Kernel-only Event 区间。因此这些数字不能用来宣称 Naive Kernel 的主要瓶颈是分配或 PCIe 传输。
 
 V1 当前可以形成的证据链：
 

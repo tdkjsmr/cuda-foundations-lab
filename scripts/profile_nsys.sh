@@ -48,5 +48,6 @@ report_base="${repo_root}/results/nsys/transpose_v1_${kernel_name}"
     --report cuda_gpu_trace \
     --format csv \
     --output "${report_base}" \
-    --force-overwrite true \
+    --force-export=true \
+    --force-overwrite=true \
     "${report_base}.nsys-rep"

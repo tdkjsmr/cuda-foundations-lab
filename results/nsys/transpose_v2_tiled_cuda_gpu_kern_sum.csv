@@ -1,0 +1,2 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+100.0,1008342,6,168057.0,168030.0,167679,168382,284.3,"cuda_foundations::transpose::tiled_transpose_kernel(const float *, float *, unsigned long, unsigned long)"

@@ -72,6 +72,8 @@ compute-sanitizer --tool memcheck ./build/transpose_test
 compute-sanitizer --tool racecheck ./build/transpose_test
 ```
 
+本版本实测 `memcheck` 为 0 errors，`racecheck` 为 0 hazards、0 errors、0 warnings；Sanitizer 通过之外，CTest 仍使用 CPU Reference 对全部 Shape 做位级验证。
+
 ### 1.5 Nsight Systems：纯命令行
 
 分析本版本新增的 Tiled Kernel：
@@ -411,9 +413,30 @@ compute-sanitizer --tool racecheck ./build/transpose_test
 ./scripts/profile_ncu.sh tiled
 ```
 
-### 10.6 预览结果与证据边界
+### 10.6 正式 Benchmark 结果
 
-正式提交前的 4096×4096 预览显示：Copy P50 `161.516 us`，Naive P50 `449.638 us`，Tiled P50 `168.243 us`。Tiled 达到 Copy 有效带宽的约 96.0%，相对 Naive 加速约 2.67 倍。该结果只用于确认优化方向；正式表格必须在代码提交后重新构建并生成带正确 Git Commit 的 CSV。
+以下结果由实现提交 `22b4350` 构建生成，原始 12 行数据保存在 `results/raw/transpose_v2.csv`：
+
+| Shape | Tiled Min (us) | Tiled P50 (us) | Tiled P95 (us) | Tiled GB/s | Copy % | vs Naive |
+|---|---:|---:|---:|---:|---:|---:|
+| 1024×8192 | 83.907 | 83.968 | 84.034 | 799.220 | 98.671% | 3.097× |
+| 8192×1024 | 85.248 | 85.309 | 85.338 | 786.652 | 96.663% | 2.668× |
+| 4096×4096 | 168.294 | 168.356 | 168.385 | 797.226 | 95.755% | 2.692× |
+| 4097×3073 | 130.949 | 131.031 | 131.152 | 768.678 | 92.567% | 2.723× |
+
+V2 在全部 Shape 上位级正确，相对 Naive 加速 `2.67×–3.10×`，达到同进程 Copy 有效带宽的 `92.57%–98.67%`。`4097×3073` 是本组唯一非 32 整除的大 Shape，且 Copy 比例最低，但仍明显快于 Naive；仅凭当前数据不能把差异全部归因于边界 Tile。`1024×8192` 的 Naive 五组结果出现一次偏低值，标准差为 `13.250 us`；报告保留该波动，不用单次最快值替代 P50。
+
+### 10.7 V2 NSYS 证据
+
+`results/nsys/transpose_v2_tiled.nsys-rep` 捕获到 6 次 Tiled Kernel。最终导出的汇总显示平均 `168.057 us`、中位数 `168.030 us`、范围 `167.679–168.382 us`、标准差 `0.284 us`。`cuda_gpu_trace` 同时确认：
+
+- Grid `(128,128,1)`、Block `(32,8,1)`；
+- 每线程 26 个 Register；
+- 静态 Shared Memory 约 `0.004 MB`，即 4096 bytes；
+- 5 次预热和 1 次正式 Kernel 位于同一 Stream；
+- H2D 与 D2H 各为 `67.109 MB`，位于 Kernel 序列之外。
+
+这份 NSYS 证据验证了启动配置、Shared Memory 分配、事件数量和时间线。它仍然不能测量 Shared Memory Bank Conflict 次数，也不能替代 NCU 的 Warp Stall、Memory Workload 或 Occupancy 指标。
 
 ## 11. 进入 V3 前需要回答
 

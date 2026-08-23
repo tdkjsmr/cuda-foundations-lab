@@ -22,7 +22,7 @@ report_base="${repo_root}/results/nsys/transpose_v2_${kernel_name}"
 "${nsys_bin}" profile \
     --trace=cuda,nvtx,osrt \
     --sample=none \
-    --stats=true \
+    --stats=false \
     --force-overwrite=true \
     --output "${report_base}" \
     "${repo_root}/build/transpose_bench" \
@@ -38,6 +38,7 @@ report_base="${repo_root}/results/nsys/transpose_v2_${kernel_name}"
     --report cuda_gpu_mem_time_sum \
     --report cuda_gpu_trace \
     --format column \
+    --force-export=true \
     --output - \
     "${report_base}.nsys-rep"
 

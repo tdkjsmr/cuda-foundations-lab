@@ -1,0 +1,9 @@
+Start (ns),Duration (ns),CorrId,GrdX,GrdY,GrdZ,BlkX,BlkY,BlkZ,Reg/Trd,StcSMem (MB),DymSMem (MB),Bytes (MB),Throughput (MB/s),SrcMemKd,DstMemKd,Device,Ctx,GreenCtx,Strm,Name
+515796619,6171080,124,,,,,,,,,,67.109,10871.636,Pageable,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+522106673,167679,125,128,128,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::transpose::tiled_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+522275152,168158,127,128,128,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::transpose::tiled_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+522444175,167902,129,128,128,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::transpose::tiled_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+522612845,168382,131,128,128,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::transpose::tiled_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+522781995,168351,133,128,128,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::transpose::tiled_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+522967274,167870,139,128,128,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::transpose::tiled_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+547865000,7210398,144,,,,,,,,,,67.109,9261.023,Device,Pageable,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]

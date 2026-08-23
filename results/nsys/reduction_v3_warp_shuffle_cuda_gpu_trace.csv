@@ -1,0 +1,21 @@
+Start (ns),Duration (ns),CorrId,GrdX,GrdY,GrdZ,BlkX,BlkY,BlkZ,Reg/Trd,StcSMem (MB),DymSMem (MB),Bytes (MB),Throughput (MB/s),SrcMemKd,DstMemKd,Device,Ctx,GreenCtx,Strm,Name
+450569650,293197,125,,,,,,,,,,4.000,13640.041,Pageable,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+451010648,6507,126,1954,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451020007,1956,128,4,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451023662,1891,130,1,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451027861,5513,132,1954,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451034111,1635,134,4,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451036579,1603,136,1,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451041003,5481,138,1954,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451047253,1603,140,4,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451049593,1603,142,1,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451052542,5481,144,1954,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451058761,1602,146,4,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451061132,1604,148,1,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451063633,5417,150,1954,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451069819,1603,152,4,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451072159,1603,154,1,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451090013,5514,160,1954,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451096296,1602,162,4,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451098636,1602,164,1,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::warp_shuffle_reduction_kernel(const float *, float *, unsigned long)"
+451123606,1634,169,,,,,,,,,,0.000,2.448,Device,Pageable,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]

@@ -2,7 +2,7 @@
 
 这是 OLCF CUDA Training Series 阶段收尾项目，目标是建立“正确性、稳定测量、Profiler 证据、单变量迭代”的 CUDA 性能工程闭环。
 
-当前分支：`v1.3`。
+Transpose 子项目最终分支：`v1.3`。
 
 当前保留四个 Transpose 版本：
 
@@ -25,6 +25,14 @@ results/                    原始 CSV 与 Profiler 报告
 docs/                       中文实现与性能分析报告
 ```
 
+## Transpose 最终状态
+
+- 四个版本：全部保留并可通过 `--kernel` 选择；
+- 正确性：全部规定 Shape、非整除边界和特殊位模式逐位通过；
+- 安全性：`memcheck` 0 errors，`racecheck` 0 hazards/errors/warnings；
+- 性能：Padded 相对 Naive 加速 `2.72×–3.15×`，达到 Copy 的 `93.68%–100.31%`；
+- Profiler：V0–V3 NSYS 报告已归档；NCU 因容器权限不可采集。
+
 ## 配置、构建和运行
 
 ```bash
@@ -32,10 +40,44 @@ export PATH=/root/.local/bin:$PATH
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=86
 cmake --build build -j
 
-./build/transpose_v3 --kernel padded --shape 31x33
-ctest --test-dir build --output-on-failure
+./build/transpose --kernel copy --shape 31x33
+./build/transpose --kernel naive --shape 31x33
+./build/transpose --kernel tiled --shape 31x33
+./build/transpose --kernel padded --shape 31x33
+
+./scripts/run_tests.sh
 ./scripts/run_benchmarks.sh
+./scripts/profile_nsys.sh tiled
 ./scripts/profile_nsys.sh padded
 ```
 
-当前 AutoDL 容器禁止访问 NVIDIA GPU Performance Counters，因此 NCU 不能用于微架构指标验收。NSYS 的 CUDA API、Kernel、显存活动和时间线分析已验证可用；详细边界与命令见 `docs/01_transpose_report.md`。
+## 版本演进
+
+| 分支 | 实现 | 主要实验变量 |
+|---|---|---|
+| `v1.0` | Copy | 连续读写带宽基线 |
+| `v1.1` | Naive | 跨步 Global Store |
+| `v1.2` | Tiled | `tile[32][32]` 恢复连续 Global Store |
+| `v1.3` | Padded | `tile[32][33]` 改变 Shared Memory Bank 映射 |
+
+## 最终交付物
+
+- [统一源码](src/transpose/transpose.cu)：四个 Kernel、Host Launcher 与演示 `main()`；
+- [正确性测试](tests/transpose_test.cu)：CPU Reference、全部 Shape 和特殊位模式；
+- [稳定 Benchmark](benchmarks/transpose_bench.cu)：CUDA Event、统计量和 CSV；
+- [完整性能报告](docs/01_transpose_report.md)：实现原理、结果、NSYS 证据与口头验收答案；
+- [最终原始数据](results/raw/transpose_v3.csv)：四版本、四种正式 Shape；
+- `results/nsys/`：各阶段 `.nsys-rep` 与命令行 CSV 摘要。
+
+## Profiler 证据边界
+
+当前 AutoDL 容器禁止访问 NVIDIA GPU Performance Counters，NCU 返回 `ERR_NVGPUCTRPERM`，因此不能完成 Bank Conflict、Warp Stall 和 Memory Workload 硬件计数器验收。NSYS 的 CUDA API、Kernel、资源字段、显存活动和时间线已验证并归档。
+
+在未来允许访问计数器的环境中直接运行：
+
+```bash
+./scripts/profile_ncu.sh tiled
+./scripts/profile_ncu.sh padded
+```
+
+项目不会用推论或 NSYS 时间线冒充 NCU 硬件指标。

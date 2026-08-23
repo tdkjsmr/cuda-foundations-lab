@@ -41,10 +41,10 @@ cmake --build build -j
 ### 1.2 演示与测试
 
 ```bash
-./build/transpose_v3 --kernel copy --shape 31x33
-./build/transpose_v3 --kernel naive --shape 31x33
-./build/transpose_v3 --kernel tiled --shape 31x33
-./build/transpose_v3 --kernel padded --shape 31x33
+./build/transpose --kernel copy --shape 31x33
+./build/transpose --kernel naive --shape 31x33
+./build/transpose --kernel tiled --shape 31x33
+./build/transpose --kernel padded --shape 31x33
 ctest --test-dir build --output-on-failure
 ```
 
@@ -95,7 +95,7 @@ compute-sanitizer --tool racecheck ./build/transpose_test
 ## 2. 文件与调用关系
 
 ```text
-transpose_v3 main
+transpose main
   ├─ 解析 --kernel copy|naive|tiled|padded 与 --shape
   ├─ 创建 Host 输入和对应 CPU Reference
   ├─ cudaMalloc 输入/输出
@@ -401,7 +401,7 @@ V2 的 Shared Memory 行跨度是 32 个 `float`。交换索引后，同一 Warp
 ### 10.5 命令
 
 ```bash
-./build/transpose_v2 --kernel tiled --shape 31x33
+./build/transpose --kernel tiled --shape 31x33
 ctest --test-dir build --output-on-failure
 compute-sanitizer --tool memcheck ./build/transpose_test
 compute-sanitizer --tool racecheck ./build/transpose_test
@@ -481,7 +481,7 @@ V2 每个 Block 使用 `32 × 32 × 4 = 4096` bytes 静态 Shared Memory；V3 �
 ### 11.4 验收命令
 
 ```bash
-./build/transpose_v3 --kernel padded --shape 31x33
+./build/transpose --kernel padded --shape 31x33
 ctest --test-dir build --output-on-failure
 compute-sanitizer --tool memcheck ./build/transpose_test
 compute-sanitizer --tool racecheck ./build/transpose_test
@@ -537,11 +537,56 @@ NSYS CSV 把 Static Shared Memory 四舍五入显示成 `0.004 MB`；查询该�
 
 不过结论应限定为“性能结果符合减少 Bank Conflict 的预期”，而不是“NSYS 已测得 Bank Conflict 消失”。后者仍需要允许访问硬件计数器的环境，用 NCU 对照 Shared Memory 冲突和 Warp Stall 指标。
 
-## 12. Transpose 口头验收问题
+## 12. 最终验收清单
 
-1. Naive Transpose 是读不连续还是写不连续？
-2. Shared Memory 为什么能让 Global Load 和 Store 同时连续？
-3. 为什么 `__syncthreads()` 不能只放在边界判断内部？
-4. 为什么 `tile[32][32]` 的转置读会发生 Bank Conflict？
-5. 为什么 `tile[32][33]` 会改变 Bank 映射？
-6. NSYS 能验证哪些事实，又不能验证哪些微架构指标？
+| 验收层 | 状态 | 证据 |
+|---|---|---|
+| 四版本功能 | 完成 | Copy、Naive、Tiled、Padded 全部保留 |
+| 任意矩形与边界 | 完成 | 8 个规定 Shape，含小 Tile、非整除、长条和方阵 |
+| 特殊值与正确性 | 完成 | 逐位比较 0、负数、重复值、NaN payload、+Inf、-Inf |
+| 稳定 Benchmark | 完成 | 20 次预热、100 次每组、5 组、Min/P50/P95/Stddev |
+| 有效带宽与相对指标 | 完成 | `results/raw/transpose_v0.csv` 至 `transpose_v3.csv` |
+| CUDA 安全检查 | 完成 | CTest、memcheck、racecheck 全部通过 |
+| NSYS 性能证据 | 完成 | V0–V3 `.nsys-rep` 和 CLI CSV 摘要已归档 |
+| NCU 硬件计数器 | 环境阻塞 | AutoDL Docker 返回 `ERR_NVGPUCTRPERM` |
+| 中文解释与复现实验 | 完成 | 本报告、README 和 scripts |
+
+因此，Transpose 的代码、测试、Benchmark、NSYS 和解释闭环已经完成，可以进入 Reduction。若严格按原始硬性清单要求 `.ncu-rep`，当前仍有一项由平台权限造成的外部缺口；该缺口不通过伪造指标关闭。
+
+## 13. 口头验收答案
+
+### 13.1 Naive Transpose 是读不合并还是写不合并？
+
+读取 `input[y * width + x]` 时 Warp 内 `x` 连续，所以读取合并；写入 `output[x * height + y]` 时相邻线程地址相隔 `height` 个 float，所以写入跨步且不合并。
+
+### 13.2 Shared Memory 为什么能同时实现连续读和连续写？
+
+线程先按输入行连续读取到 Tile，再同步并交换 Shared Memory 的行列索引，最后按输出行连续写回。Shared Memory 把“读取线程映射”和“写入线程映射”解耦。
+
+### 13.3 为什么同步不能放在边界判断内部？
+
+`__syncthreads()` 是 Block 级屏障；如果只有部分线程到达，行为未定义并可能死锁。边界判断只能包围读写，所有线程必须无条件经过同步。
+
+### 13.4 为什么 `tile[32][32]` 会产生 Bank Conflict？
+
+转置读时 Warp 内相邻线程读取同一列的不同行，地址相差 32 个 word。对 32 个 Bank 取模后落到同一 Bank，访问需要串行化。
+
+### 13.5 为什么 `tile[32][33]` 能改变 Bank 映射？
+
+行跨度从 32 变为 33 个 word，Bank 号变为 `(row + column) mod 32`，相邻 row 不再映射到同一 Bank。额外列不保存有效矩阵数据，只改变地址布局。
+
+### 13.6 为什么更高 Occupancy 不保证 Transpose 更快？
+
+Occupancy 只描述可驻留 Warp 比例，不表示每个 Warp 的内存访问高效。跨步 Global Store 或 Shared Memory 冲突仍可能让高 Occupancy Kernel 等待内存。
+
+### 13.7 为什么不同 Shape 的性能不同？
+
+Shape 会改变行跨度、Grid 形状、不完整边界 Tile 比例、缓存和内存分区映射。相同元素数量也不保证相同访存行为。
+
+### 13.8 为什么使用 Copy 而不是理论显存带宽作为参考？
+
+Copy 具有与 Transpose 相同的数据类型、元素数量、读写字节和 Benchmark 环境，反映当前 GPU 频率、编译配置与软件路径下可达到的实际连续读写带宽。
+
+### 13.9 NSYS 能证明什么？
+
+NSYS 能验证 Kernel 身份、次数、时间、Grid/Block、Register、Shared Memory 大小、CUDA API 和时间线；它不能提供本容器禁止访问的 Global Memory 事务、Bank Conflict、Warp Stall 或硬件 Occupancy 计数器。

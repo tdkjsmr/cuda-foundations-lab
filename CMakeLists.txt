@@ -43,8 +43,8 @@ add_library(transpose_core OBJECT src/transpose/transpose.cu)
 target_compile_definitions(transpose_core PRIVATE CUDA_FOUNDATIONS_TRANSPOSE_CORE_ONLY=1)
 configure_cuda_target(transpose_core)
 
-add_executable(transpose_v3 src/transpose/transpose.cu)
-configure_cuda_target(transpose_v3)
+add_executable(transpose src/transpose/transpose.cu)
+configure_cuda_target(transpose)
 
 add_executable(transpose_test
     tests/transpose_test.cu
@@ -63,5 +63,5 @@ target_compile_definitions(
 configure_cuda_target(transpose_bench)
 
 if(BUILD_TESTING)
-    add_test(NAME transpose_v0_v1_v2_v3_correctness COMMAND transpose_test)
+    add_test(NAME transpose_correctness COMMAND transpose_test)
 endif()

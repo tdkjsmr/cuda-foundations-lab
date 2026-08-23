@@ -1,0 +1,278 @@
+# Reduction 性能报告
+
+## 0. 当前版本与证据边界
+
+- Git 分支：`v2.0`
+- 当前实现：V0 Interleaved Addressing
+- Block：256 threads
+- 数据类型：FP32
+- CPU Reference：double 串行累加
+- 最终结果：GPU 多阶段归约到一个 Device float
+- GPU：RTX 3090，`sm_86`
+- 正式构建：C++17 / CUDA C++17、Release、`-O3 -lineinfo`
+
+当前 AutoDL Docker 容器禁止访问 NVIDIA GPU Performance Counters。NCU 返回 `ERR_NVGPUCTRPERM`，因此本报告不声称已经测得 Warp Divergence、Warp Stall、Achieved Occupancy、DRAM Throughput 或 Shared Memory 硬件吞吐。
+
+当前可用证据：
+
+```text
+CUDA Event：完整 GPU 多阶段归约的 Kernel-only 时间
+CPU double Reference：absolute / normalized error
+Compute Sanitizer：越界、数据竞争和同步错误
+Nsight Systems：阶段数量、Grid 递减、Kernel 时间和 CUDA API 时间线
+```
+
+## 1. 可复制命令
+
+### 1.1 Release 构建
+
+```bash
+export PATH=/root/.local/bin:$PATH
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=86
+cmake --build build -j
+```
+
+### 1.2 演示与测试
+
+```bash
+./build/reduction --size 1000003 --pattern random
+./build/reduction --size 1025 --pattern dynamic_range
+./build/reduction_test
+ctest --test-dir build --output-on-failure
+```
+
+### 1.3 Compute Sanitizer
+
+```bash
+compute-sanitizer --tool memcheck ./build/reduction_test
+compute-sanitizer --tool racecheck ./build/reduction_test
+compute-sanitizer --tool synccheck ./build/reduction_test
+```
+
+### 1.4 稳定 Benchmark
+
+```bash
+./build/reduction_bench \
+  --kernel interleaved \
+  --size 16777219 \
+  --warmup 20 \
+  --iterations 100 \
+  --groups 5
+
+./scripts/run_reduction_benchmarks.sh
+```
+
+### 1.5 Profiler
+
+```bash
+./scripts/profile_reduction_nsys.sh
+```
+
+未来在允许性能计数器的环境运行：
+
+```bash
+./scripts/profile_reduction_ncu.sh
+```
+
+## 2. 文件与调用关系
+
+```text
+reduction main
+  ├─ 解析 --size 与 --pattern
+  ├─ 生成 Host 输入和 double CPU Reference
+  ├─ cudaMalloc 输入与两块 Ping-Pong Workspace
+  ├─ cudaMemcpy HostToDevice
+  ├─ reduce_interleaved
+  │    ├─ Stage 0：N → ceil(N / 256)
+  │    ├─ Stage 1：partials → 更少 partials
+  │    ├─ ...
+  │    └─ Final Stage：partials → 1
+  ├─ cudaDeviceSynchronize
+  ├─ 只复制一个 float 回 Host
+  ├─ absolute / normalized error 验证
+  └─ cudaFree
+
+reduction_test
+  ├─ 回归全部规定 N
+  ├─ zeros / ones / alternating / random / dynamic_range
+  ├─ 检查第一阶段 Partial Sum 数量
+  ├─ 检查完整 Kernel Launch 数量
+  └─ 检查误差阈值
+
+reduction_bench
+  ├─ 同一输入和两块 Workspace
+  ├─ 每次迭代执行完整多阶段归约
+  ├─ Event 只包围全部 Kernel Stage
+  ├─ 计时后复制一个结果并验证
+  └─ 输出时间、下界带宽、阶段结构和误差
+```
+
+`src/reduction/reduction.cu` 同时包含 Kernel、Host 多阶段控制和演示 `main()`；测试与 Benchmark 编译同一源码的 Core 模式，不复制 Kernel 实现。
+
+## 3. V0 Interleaved Addressing
+
+### 3.1 每线程加载一个元素
+
+Block 固定为 256 线程。每个线程读取：
+
+```cpp
+global_index = blockIdx.x * blockDim.x + threadIdx.x;
+shared[threadIdx.x] = global_index < N ? input[global_index] : 0.0F;
+```
+
+最后一个不完整 Block 中，越界线程写入加法单位元 0。这样 Shared Memory 的 256 个位置始终完成初始化，归约阶段不需要再对右操作数做边界判断。
+
+### 3.2 交错活跃线程
+
+V0 使用：
+
+```cpp
+for (stride = 1; stride < blockDim.x; stride *= 2) {
+    if (threadIdx.x % (2 * stride) == 0) {
+        shared[threadIdx.x] += shared[threadIdx.x + stride];
+    }
+    __syncthreads();
+}
+```
+
+以一个 Warp 的前几轮为例：
+
+```text
+stride=1：lane 0,2,4,6,... 活跃
+stride=2：lane 0,4,8,12,... 活跃
+stride=4：lane 0,8,16,24 活跃
+```
+
+活跃 Lane 分散在 Warp 中，大量 Lane 不执行加法但仍随 Warp 前进。这是 V0 刻意保留的低效寻址基线。
+
+### 3.3 同步位置
+
+每轮加法后都必须执行 `__syncthreads()`，因为下一轮可能由不同线程读取本轮写入。同步位于条件判断外，保证整个 Block 的所有线程无条件到达屏障。
+
+## 4. GPU 多阶段归约
+
+一个 Kernel 只能让每个 Block 产生一个 Partial Sum。Host 控制器继续在两块 Device Workspace 之间 Ping-Pong：
+
+```text
+原始输入 → workspace_a → workspace_b → workspace_a → ... → 1 个结果
+```
+
+对于 `N=1,000,003`：
+
+```text
+Stage 0：1,000,003 → 3,907
+Stage 1：3,907 → 16
+Stage 2：16 → 1
+```
+
+共 3 次 Kernel Launch。Partial Sums 不复制回 CPU，Host 只在最后 D2H 一个 float。
+
+`N=1` 也执行一次 Kernel，使所有输入规模共享同一条 Device 归约路径。
+
+## 5. 数值正确性
+
+CPU 使用 double 串行累加：
+
+```cpp
+double reference = 0.0;
+for (float value : input) {
+    reference += static_cast<double>(value);
+}
+```
+
+GPU 使用 FP32 树形顺序，不能要求 bitwise 相等。报告：
+
+```text
+absolute_error = abs(gpu_result - reference)
+normalized_error = absolute_error / max(sum(abs(input)), 1.0)
+tolerance = 5e-6 × sum(abs(input)) + 1e-5
+```
+
+验收条件：
+
+```text
+absolute_error <= tolerance
+```
+
+同时保留 absolute 和 normalized error，避免总和接近 0 时只看相对误差失真。
+
+## 6. 测试覆盖
+
+规定 N：
+
+```text
+1, 31, 32, 33,
+255, 256, 257,
+1023, 1024, 1025,
+1,000,003, 16,777,219
+```
+
+它们覆盖小于/等于/超过 Warp，Block 边界，非 2 的幂，非 Block 整除和大规模多阶段归约。
+
+输入分布：
+
+```text
+zeros
+ones
+alternating
+random [-1, 1]
+dynamic_range
+```
+
+全 1 只用于其中一个用例，不作为唯一正确性依据。
+
+## 7. Benchmark 语义
+
+正式计时流程：
+
+```text
+分配与 H2D
+→ 20 次完整归约预热
+→ Event Start
+→ 连续执行 100 次完整 GPU 多阶段归约
+→ Event Stop / Synchronize
+→ 总时间除以 100
+→ 重复 5 组
+→ D2H 一个最终结果并验证
+```
+
+计时区间包含所有 Reduction Kernel Stage，不包含 cudaMalloc、H2D、D2H、CPU Reference 和正确性比较。
+
+下界有效带宽：
+
+```text
+N × sizeof(float) / 完整归约 P50
+```
+
+它不包含中间 Partial Sum 读写，所以明确标记为 Lower-bound Effective Bandwidth。
+
+## 8. 正式结果
+
+代码提交并重新构建后填写 `results/raw/reduction_v0.csv`。
+
+## 9. NSYS 分析计划
+
+使用 `N=1,000,003`、5 次预热和 1 次正式完整归约。每次归约有 3 个阶段，因此报告应捕获 18 次 Kernel：
+
+```text
+6 次完整归约 × 3 stages = 18 launches
+```
+
+重点查看：
+
+1. `cuda_gpu_trace` 中每组三个 Grid 是否按 `3907 → 16 → 1` 递减；
+2. 第一阶段是否占主要 Device 时间；
+3. 稳态 `cudaLaunchKernel` Host API 时间；
+4. 预热后的 `cudaDeviceSynchronize` 与正式 `cudaEventSynchronize`；
+5. H2D 和单 float D2H 是否位于 Kernel-only 计时之外。
+
+NSYS 只能验证阶段结构和时间线，不能直接测量 Interleaved 的 Warp Divergence 或 Stall 原因。
+
+## 10. 进入 V1 前需要回答
+
+1. 为什么 V0 中活跃线程会在 Warp 内交错分布？
+2. 为什么越界线程应该把 Shared Memory 槽位置零？
+3. 为什么每轮 `__syncthreads()` 必须由整个 Block 执行？
+4. 为什么 Partial Sums 必须继续留在 GPU？
+5. 为什么 FP32 GPU 结果不能要求与 double CPU Reference 位级相同？
+6. NSYS 能证明多阶段结构中的哪些事实？

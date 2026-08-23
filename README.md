@@ -2,6 +2,8 @@
 
 这是 OLCF CUDA Training Series 阶段收尾项目，目标是建立“正确性、稳定测量、Profiler 证据、单变量迭代”的 CUDA 性能工程闭环。
 
+当前开发分支：`v2.0`。
+
 Transpose 子项目最终分支：`v1.3`。
 
 当前保留四个 Transpose 版本：
@@ -18,8 +20,11 @@ V0 建立连续读写的实际带宽参考。V1 把连续输出写入改为跨�
 ```text
 include/                    CUDA 错误检查、Event 计时、统计和公共接口
 src/transpose/transpose.cu  V0/V1/V2/V3 Kernel、Host 启动逻辑和演示 main
+src/reduction/reduction.cu  V0 Kernel、GPU 多阶段控制和演示 main
 tests/transpose_test.cu     CPU Reference、正确性、边界和特殊位模式测试
+tests/reduction_test.cu     规定 N、数据分布、误差与多阶段测试
 benchmarks/                 独立 Copy/Naive/Tiled/Padded 稳定态性能测量
+                            以及 Reduction 完整多阶段稳定 Benchmark
 scripts/                    测试、Benchmark、NCU/NSYS 命令
 results/                    原始 CSV 与 Profiler 报告
 docs/                       中文实现与性能分析报告
@@ -32,6 +37,16 @@ docs/                       中文实现与性能分析报告
 - 安全性：`memcheck` 0 errors，`racecheck` 0 hazards/errors/warnings；
 - 性能：Padded 相对 Naive 加速 `2.72×–3.15×`，达到 Copy 的 `93.68%–100.31%`；
 - Profiler：V0–V3 NSYS 报告已归档；NCU 因容器权限不可采集。
+
+## Reduction V0 当前状态
+
+- Interleaved Addressing：已实现；
+- 任意 N 和非 2 的幂：已支持；
+- GPU 多阶段归约：已支持，两块 Workspace Ping-Pong 到单个结果；
+- CPU Reference：double 串行累加；
+- 误差：absolute error、normalized error 和输入相关 tolerance；
+- 测试：覆盖全部规定 N 与五种数据分布；
+- Benchmark / NSYS：命令与报告见 `docs/02_reduction_report.md`。
 
 ## 配置、构建和运行
 
@@ -49,6 +64,10 @@ cmake --build build -j
 ./scripts/run_benchmarks.sh
 ./scripts/profile_nsys.sh tiled
 ./scripts/profile_nsys.sh padded
+
+./build/reduction --size 1000003 --pattern random
+./scripts/run_reduction_benchmarks.sh
+./scripts/profile_reduction_nsys.sh
 ```
 
 ## 版本演进
@@ -59,6 +78,7 @@ cmake --build build -j
 | `v1.1` | Naive | 跨步 Global Store |
 | `v1.2` | Tiled | `tile[32][32]` 恢复连续 Global Store |
 | `v1.3` | Padded | `tile[32][33]` 改变 Shared Memory Bank 映射 |
+| `v2.0` | Interleaved Reduction | 交错活跃线程与完整 GPU 多阶段归约基线 |
 
 ## 最终交付物
 

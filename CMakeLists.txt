@@ -62,6 +62,30 @@ target_compile_definitions(
 )
 configure_cuda_target(transpose_bench)
 
+add_library(reduction_core OBJECT src/reduction/reduction.cu)
+target_compile_definitions(reduction_core PRIVATE CUDA_FOUNDATIONS_REDUCTION_CORE_ONLY=1)
+configure_cuda_target(reduction_core)
+
+add_executable(reduction src/reduction/reduction.cu)
+configure_cuda_target(reduction)
+
+add_executable(reduction_test
+    tests/reduction_test.cu
+    $<TARGET_OBJECTS:reduction_core>
+)
+configure_cuda_target(reduction_test)
+
+add_executable(reduction_bench
+    benchmarks/reduction_bench.cu
+    $<TARGET_OBJECTS:reduction_core>
+)
+target_compile_definitions(
+    reduction_bench
+    PRIVATE CUDA_FOUNDATIONS_GIT_COMMIT="${CUDA_FOUNDATIONS_GIT_COMMIT}"
+)
+configure_cuda_target(reduction_bench)
+
 if(BUILD_TESTING)
     add_test(NAME transpose_correctness COMMAND transpose_test)
+    add_test(NAME reduction_interleaved_correctness COMMAND reduction_test)
 endif()

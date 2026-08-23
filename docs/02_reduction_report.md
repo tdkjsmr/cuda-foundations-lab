@@ -221,6 +221,15 @@ dynamic_range
 
 全 1 只用于其中一个用例，不作为唯一正确性依据。
 
+本轮实际检查结果：
+
+```text
+CTest：2/2 PASS（Transpose + Reduction）
+memcheck：0 errors
+racecheck：0 hazards，0 errors，0 warnings
+synccheck：0 errors
+```
+
 ## 7. Benchmark 语义
 
 正式计时流程：
@@ -248,25 +257,49 @@ N × sizeof(float) / 完整归约 P50
 
 ## 8. 正式结果
 
-代码提交并重新构建后填写 `results/raw/reduction_v0.csv`。
+测试设备为 RTX 3090。CSV 中 `cuda_driver_api_version=13.2` 是 `cudaDriverGetVersion` 返回的驱动所支持 CUDA Driver API 版本；`cuda_runtime_version=12.4` 是本项目链接的 CUDA Runtime 版本。
 
-## 9. NSYS 分析计划
+| N | P50 (μs) | P95 (μs) | 下界带宽 (GB/s) | 首阶段 Partials | Launches | Absolute Error |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 2.949 | 2.966 | 0.001 | 1 | 1 | 0 |
+| 31 | 2.970 | 2.978 | 0.042 | 1 | 1 | 2.570e-7 |
+| 32 | 3.369 | 3.406 | 0.038 | 1 | 1 | 1.974e-7 |
+| 33 | 2.959 | 2.959 | 0.045 | 1 | 1 | 2.868e-7 |
+| 255 | 2.990 | 3.000 | 0.341 | 1 | 1 | 1.753e-8 |
+| 256 | 2.980 | 2.996 | 0.344 | 1 | 1 | 6.136e-7 |
+| 257 | 5.919 | 5.935 | 0.174 | 2 | 2 | 7.328e-7 |
+| 1,023 | 5.868 | 5.876 | 0.697 | 4 | 2 | 1.046e-6 |
+| 1,024 | 5.939 | 5.949 | 0.690 | 4 | 2 | 1.463e-6 |
+| 1,025 | 5.990 | 5.990 | 0.684 | 5 | 2 | 1.493e-6 |
+| 1,000,003 | 28.436 | 28.455 | 140.665 | 3,907 | 3 | 9.518e-5 |
+| 16,777,219 | 347.382 | 347.439 | 193.185 | 65,537 | 4 | 1.226e-4 |
 
-使用 `N=1,000,003`、5 次预热和 1 次正式完整归约。每次归约有 3 个阶段，因此报告应捕获 18 次 Kernel：
+全部 12 个规模均满足输入相关 tolerance。`N≤256` 的约 3 μs 主要反映一次 Kernel Launch 的固定成本；`N=257` 增加第二阶段后时间约翻倍。大规模输入才更能反映 V0 Kernel 的吞吐行为。原始数据见 `results/raw/reduction_v0.csv`。
+
+## 9. NSYS 实测分析
+
+命令使用 `N=1,000,003`、5 次预热和 1 次正式归约，共执行 6 次完整归约。报告捕获到 18 次 Kernel，Grid 严格重复：
 
 ```text
-6 次完整归约 × 3 stages = 18 launches
+3907 → 16 → 1
 ```
 
-重点查看：
+按 Grid 汇总：
 
-1. `cuda_gpu_trace` 中每组三个 Grid 是否按 `3907 → 16 → 1` 递减；
-2. 第一阶段是否占主要 Device 时间；
-3. 稳态 `cudaLaunchKernel` Host API 时间；
-4. 预热后的 `cudaDeviceSynchronize` 与正式 `cudaEventSynchronize`；
-5. H2D 和单 float D2H 是否位于 Kernel-only 计时之外。
+| Stage Grid | 次数 | 平均 Kernel 时间 | Kernel 总时间占比 |
+|---:|---:|---:|---:|
+| 3,907 | 6 | 22.430 μs | 81.78% |
+| 16 | 6 | 2.539 μs | 9.26% |
+| 1 | 6 | 2.460 μs | 8.97% |
 
-NSYS 只能验证阶段结构和时间线，不能直接测量 Interleaved 的 Warp Divergence 或 Stall 原因。
+其他可验证事实：
+
+- 每个 Kernel 均为 `block=(256,1,1)`、16 registers/thread、1,024 B static shared memory；
+- Kernel 总计 164.568 μs；`cudaLaunchKernel` 共 18 次，中位 Host API 时间 3.501 μs；
+- H2D 只有一次、约 4 MB，D2H 只有一次、4 B，证明 Partial Sums 没有逐阶段回传 Host；
+- H2D 位于归约前，D2H 位于所有 Kernel 后，不在 CUDA Event 的 Kernel-only 正式计时语义内。
+
+NSYS 插桩下 benchmark Event 时间为 34.656 μs，高于无 Profiler 的正式 P50 28.436 μs，因此 NSYS 数字只用于时间线和阶段占比，不替代正式性能基线。NSYS 不能证明 Warp Divergence、Bank Conflict、Stall 原因或实际 DRAM 吞吐；这些仍需未来在允许计数器的环境中用 NCU 验收。
 
 ## 10. 进入 V1 前需要回答
 

@@ -220,7 +220,7 @@ void append_csv(const std::string& path,
     }
 
     if (write_header) {
-        output << "git_commit,timestamp,gpu_name,driver_version,cuda_version,"
+        output << "git_commit,timestamp,gpu_name,cuda_driver_api_version,cuda_runtime_version,"
                   "kernel_name,n,dtype,block,first_stage_grid,warmup_count,"
                   "iteration_count,group_count,min_us,median_us,p95_us,stddev_us,"
                   "lower_bound_bandwidth_gbps,first_stage_partial_count,"

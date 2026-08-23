@@ -1,0 +1,21 @@
+Start (ns),Duration (ns),CorrId,GrdX,GrdY,GrdZ,BlkX,BlkY,BlkZ,Reg/Trd,StcSMem (MB),DymSMem (MB),Bytes (MB),Throughput (MB/s),SrcMemKd,DstMemKd,Device,Ctx,GreenCtx,Strm,Name
+436918036,301001,125,,,,,,,,,,4.000,13288.040,Pageable,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+437305992,23076,126,3907,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437329900,2816,128,16,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437333452,2465,130,1,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437336621,22339,132,3907,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437359792,2464,134,16,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437363056,2433,136,1,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437366257,22275,138,3907,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437389268,2464,140,16,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437392532,2465,142,1,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437395797,22403,144,3907,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437419000,2496,146,16,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437422264,2465,148,1,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437425529,22307,150,3907,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437448572,2496,152,16,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437451836,2465,154,1,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437471199,22179,160,3907,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437494178,2496,162,16,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437497443,2464,164,1,1,1,256,1,1,16,0.001,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::reduction::interleaved_reduction_kernel(const float *, float *, unsigned long)"
+437526823,1632,169,,,,,,,,,,0.000,2.451,Device,Pageable,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]

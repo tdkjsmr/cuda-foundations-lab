@@ -89,6 +89,14 @@ cmake --build build -j
 - [最终原始数据](results/raw/transpose_v3.csv)：四版本、四种正式 Shape；
 - `results/nsys/`：各阶段 `.nsys-rep` 与命令行 CSV 摘要。
 
+Reduction V0：
+
+- [统一源码](src/reduction/reduction.cu)：Interleaved Kernel、GPU 多阶段 Host 控制与演示 `main()`；
+- [正确性测试](tests/reduction_test.cu)：全部规定 N、五类输入和误差验收；
+- [稳定 Benchmark](benchmarks/reduction_bench.cu)：完整多阶段 CUDA Event 计时；
+- [性能报告](docs/02_reduction_report.md)：算法、测试、正式数据与 NSYS 阶段分析；
+- [V0 原始数据](results/raw/reduction_v0.csv) 与 `results/nsys/reduction_v0_interleaved*`。
+
 ## Profiler 证据边界
 
 当前 AutoDL 容器禁止访问 NVIDIA GPU Performance Counters，NCU 返回 `ERR_NVGPUCTRPERM`，因此不能完成 Bank Conflict、Warp Stall 和 Memory Workload 硬件计数器验收。NSYS 的 CUDA API、Kernel、资源字段、显存活动和时间线已验证并归档。

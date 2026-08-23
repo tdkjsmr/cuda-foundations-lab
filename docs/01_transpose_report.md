@@ -179,11 +179,13 @@ Effective Bandwidth = 2 × width × height × sizeof(float) / Kernel Time
 
 ## 6. 实测结果
 
-运行正式 Benchmark 后填写，禁止预先编造：
+以下结果来自本机正式 Benchmark，不包含 Profiler 开销：
 
 | Shape | Min (us) | P50 (us) | P95 (us) | Stddev (us) | Effective GB/s |
 |---|---:|---:|---:|---:|---:|
-| 4096×4096 | 待测 | 待测 | 待测 | 待测 | 待测 |
+| 4096×4096 | 161.475 | 161.505 | 161.581 | 0.045 | 831.042 |
+
+本次数据来自代码提交 `3ba76f9`，原始记录保存在 `results/raw/transpose_v0.csv`。正确性测试、`memcheck` 和 `racecheck` 均为 0 错误；NCU 指标尚待按下一节命令采集，因此当前只报告 CUDA Event 实测值，不提前给出微架构瓶颈结论。
 
 ## 7. V0 的 Nsight 验收问题
 

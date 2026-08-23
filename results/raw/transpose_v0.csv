@@ -1,0 +1,2 @@
+git_commit,timestamp,gpu_name,driver_version,cuda_version,kernel_name,shape,dtype,grid,block,warmup_count,iteration_count,group_count,min_us,median_us,p95_us,stddev_us,effective_bandwidth_gbps,max_abs_error,relative_error
+3ba76f9,2026-08-23T11:35:41Z,NVIDIA GeForce RTX 3090,13.2,12.4,copy_v0,4096x4096,FP32,128x128,32x8,20,100,5,161.475,161.505,161.581,0.0450597,831.042,0,0

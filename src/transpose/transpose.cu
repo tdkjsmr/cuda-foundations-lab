@@ -127,6 +127,54 @@ __global__ void tiled_transpose_kernel(const float* input,
     }
 }
 
+// V3 仅给 Shared Memory 每行增加一个 float，使列式读取跨过连续 Bank。
+__global__ void padded_transpose_kernel(const float* input,
+                                        float* output,
+                                        std::size_t width,
+                                        std::size_t height) {
+    // 32×33 比 V2 多一列；有效数据仍只使用前 32 列。
+    __shared__ float tile[kTileDim][kTileDim + 1U];
+
+    // 输入坐标与 V2 完全相同，保证 Global Load 行为不变。
+    const std::size_t input_x =
+        static_cast<std::size_t>(blockIdx.x) * kTileDim + threadIdx.x;
+    const std::size_t input_base_y =
+        static_cast<std::size_t>(blockIdx.y) * kTileDim + threadIdx.y;
+
+    // 每个线程仍以 8 行为步长加载 4 个元素。
+    for (unsigned int row_offset = 0; row_offset < kTileDim; row_offset += kBlockRows) {
+        const std::size_t input_y = input_base_y + row_offset;
+
+        // 只访问原矩阵内部的 Global Memory；Padding 列不需要初始化。
+        if (input_x < width && input_y < height) {
+            // Warp 内相邻线程继续执行连续 Global Load。
+            tile[threadIdx.y + row_offset][threadIdx.x] =
+                input[input_y * width + input_x];
+        }
+    }
+
+    // 所有合法 Shared Memory 写入必须在转置读取前对整个 Block 可见。
+    __syncthreads();
+
+    // 输出坐标继续交换 blockIdx.x/y，与 V2 保持相同 Global Store 布局。
+    const std::size_t output_x =
+        static_cast<std::size_t>(blockIdx.y) * kTileDim + threadIdx.x;
+    const std::size_t output_base_y =
+        static_cast<std::size_t>(blockIdx.x) * kTileDim + threadIdx.y;
+
+    // 输出仍是 width 行、height 列的行主序转置矩阵。
+    for (unsigned int row_offset = 0; row_offset < kTileDim; row_offset += kBlockRows) {
+        const std::size_t output_y = output_base_y + row_offset;
+
+        // 对矩形和非 32 整除 Shape 执行与 V2 相同的输出边界检查。
+        if (output_x < height && output_y < width) {
+            // 行跨度变为 33 个 word；相邻线程的列式读取因此轮换到不同 Bank。
+            output[output_y * height + output_x] =
+                tile[threadIdx.x][threadIdx.y + row_offset];
+        }
+    }
+}
+
 dim3 transpose_block_dimensions() {
     // 32 个 x 线程正好覆盖一个 Warp 的连续列，8 个 y 线程组成 256 线程 Block。
     return dim3(kTileDim, kBlockRows, 1U);
@@ -217,15 +265,33 @@ void launch_tiled(const float* device_input,
     CUDA_CHECK(cudaGetLastError());
 }
 
+void launch_padded(const float* device_input,
+                   float* device_output,
+                   std::size_t width,
+                   std::size_t height,
+                   cudaStream_t stream) {
+    // V3 复用全部参数检查和启动配置，只改变 Kernel 内 Shared Memory 行跨度。
+    validate_launch_arguments(device_input, device_output, width, height, "launch_padded");
+    const dim3 block = transpose_block_dimensions();
+    const dim3 grid = transpose_grid_dimensions(width, height);
+
+    // Padding 仍是静态 Shared Memory，因此动态 Shared Memory 参数保持为 0。
+    padded_transpose_kernel<<<grid, block, 0U, stream>>>(
+        device_input, device_output, width, height);
+
+    // 检查 Launch 即时错误；异步执行错误由调用方同步点捕获。
+    CUDA_CHECK(cudaGetLastError());
+}
+
 }  // namespace cuda_foundations::transpose
 
 #ifndef CUDA_FOUNDATIONS_TRANSPOSE_CORE_ONLY
 
 namespace {
 
-// 演示程序默认运行 V2，也允许显式回看 V0 和 V1。
+// 演示程序默认运行 V3，也允许显式回看 V0、V1 和 V2。
 struct DemoOptions {
-    std::string kernel_name = "tiled";
+    std::string kernel_name = "padded";
     std::size_t width = 8U;
     std::size_t height = 4U;
 };
@@ -253,7 +319,7 @@ std::pair<std::size_t, std::size_t> parse_shape(const std::string& text) {
     return {width, height};
 }
 
-// 解析 --kernel copy|naive|tiled 和 --shape WIDTHxHEIGHT，参数顺序可以互换。
+// 解析 --kernel copy|naive|tiled|padded 和 --shape WIDTHxHEIGHT，参数顺序可以互换。
 DemoOptions parse_options(int argc, char** argv) {
     DemoOptions options;
 
@@ -263,8 +329,9 @@ DemoOptions parse_options(int argc, char** argv) {
         if (argument == "--kernel" && index + 1 < argc) {
             options.kernel_name = argv[++index];
             if (options.kernel_name != "copy" && options.kernel_name != "naive" &&
-                options.kernel_name != "tiled") {
-                throw std::invalid_argument("--kernel 只支持 copy、naive 或 tiled");
+                options.kernel_name != "tiled" &&
+                options.kernel_name != "padded") {
+                throw std::invalid_argument("--kernel 只支持 copy、naive、tiled 或 padded");
             }
         } else if (argument == "--shape" && index + 1 < argc) {
             const auto shape = parse_shape(argv[++index]);
@@ -290,7 +357,7 @@ int main(int argc, char** argv) {
         const std::size_t byte_count =
             cuda_foundations::test::checked_float_byte_count(element_count);
 
-        // 三个版本使用完全相同的确定性输入；Reference 由所选 Kernel 决定。
+        // 四个版本使用完全相同的确定性输入；Reference 由所选 Kernel 决定。
         const std::vector<float> host_input =
             cuda_foundations::test::make_deterministic_input(element_count);
         const std::vector<float> host_reference =
@@ -317,8 +384,11 @@ int main(int argc, char** argv) {
         } else if (options.kernel_name == "naive") {
             cuda_foundations::transpose::launch_naive(
                 device_input, device_output, options.width, options.height);
-        } else {
+        } else if (options.kernel_name == "tiled") {
             cuda_foundations::transpose::launch_tiled(
+                device_input, device_output, options.width, options.height);
+        } else {
+            cuda_foundations::transpose::launch_padded(
                 device_input, device_output, options.width, options.height);
         }
 
@@ -342,7 +412,7 @@ int main(int argc, char** argv) {
             return EXIT_FAILURE;
         }
 
-        // Copy 输出 Shape 不变；Naive 与 Tiled 输出的逻辑 Shape 为 height × width。
+        // Copy 输出 Shape 不变；Naive、Tiled 与 Padded 输出的逻辑 Shape 为 height × width。
         const std::size_t output_width =
             options.kernel_name == "copy" ? options.width : options.height;
         const std::size_t output_height =

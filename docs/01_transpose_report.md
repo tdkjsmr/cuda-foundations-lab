@@ -2,11 +2,12 @@
 
 ## 0. 当前版本与证据边界
 
-- Git 分支：`v1.2`
+- Git 分支：`v1.3`
 - V0：Copy Baseline
 - V1：Naive Transpose
 - V2：Shared Memory Tiled（`tile[32][32]`）
-- 下一版本：V3 Padded Shared Memory
+- V3：Padded Shared Memory（`tile[32][33]`）
+- Transpose 四版本已完整实现
 - GPU：RTX 3090，`sm_86`
 - CUDA Toolkit：12.4
 - 正式构建：C++17 / CUDA C++17、Release、`-O3 -lineinfo`
@@ -40,9 +41,10 @@ cmake --build build -j
 ### 1.2 演示与测试
 
 ```bash
-./build/transpose_v2 --kernel copy --shape 31x33
-./build/transpose_v2 --kernel naive --shape 31x33
-./build/transpose_v2 --kernel tiled --shape 31x33
+./build/transpose_v3 --kernel copy --shape 31x33
+./build/transpose_v3 --kernel naive --shape 31x33
+./build/transpose_v3 --kernel tiled --shape 31x33
+./build/transpose_v3 --kernel padded --shape 31x33
 ctest --test-dir build --output-on-failure
 ```
 
@@ -76,10 +78,10 @@ compute-sanitizer --tool racecheck ./build/transpose_test
 
 ### 1.5 Nsight Systems：纯命令行
 
-分析本版本新增的 Tiled Kernel：
+分析本版本新增的 Padded Kernel：
 
 ```bash
-./scripts/profile_nsys.sh tiled
+./scripts/profile_nsys.sh padded
 ```
 
 分析 Copy Baseline：
@@ -93,12 +95,12 @@ compute-sanitizer --tool racecheck ./build/transpose_test
 ## 2. 文件与调用关系
 
 ```text
-transpose_v2 main
-  ├─ 解析 --kernel copy|naive|tiled 与 --shape
+transpose_v3 main
+  ├─ 解析 --kernel copy|naive|tiled|padded 与 --shape
   ├─ 创建 Host 输入和对应 CPU Reference
   ├─ cudaMalloc 输入/输出
   ├─ cudaMemcpy HostToDevice
-  ├─ launch_copy、launch_naive 或 launch_tiled
+  ├─ launch_copy、launch_naive、launch_tiled 或 launch_padded
   │    ├─ 相同 Grid
   │    ├─ 相同 Block=(32,8)
   │    ├─ 不使用动态 Shared Memory
@@ -110,18 +112,18 @@ transpose_v2 main
 
 transpose_test
   ├─ 手算验证 CPU Transpose Reference
-  ├─ 回归 V0 Copy 与 V1 Naive
-  └─ 验证 V2 Tiled 的全部 Shape 与特殊位模式
+  ├─ 回归 V0 Copy、V1 Naive 与 V2 Tiled
+  └─ 验证 V3 Padded 的全部 Shape 与特殊位模式
 
 transpose_bench
   ├─ 同一进程、同一输入、同一 Device Buffer
-  ├─ 独立预热 Copy、Naive 和 Tiled
+  ├─ 独立预热 Copy、Naive、Tiled 和 Padded
   ├─ CUDA Event 测量各版本
   ├─ 计时后分别验证正确性
   └─ 输出绝对时间、有效带宽和相对指标
 ```
 
-`src/transpose/transpose.cu` 同时保存三个 Kernel、Host 启动逻辑和演示 `main()`。测试和 Benchmark 编译同一源码的 Core 模式，避免复制 Kernel 实现。
+`src/transpose/transpose.cu` 同时保存四个 Kernel、Host 启动逻辑和演示 `main()`。测试和 Benchmark 编译同一源码的 Core 模式，避免复制 Kernel 实现。
 
 ## 3. V0 Copy Baseline
 
@@ -438,10 +440,71 @@ V2 在全部 Shape 上位级正确，相对 Naive 加速 `2.67×–3.10×`，达
 
 这份 NSYS 证据验证了启动配置、Shared Memory 分配、事件数量和时间线。它仍然不能测量 Shared Memory Bank Conflict 次数，也不能替代 NCU 的 Warp Stall、Memory Workload 或 Occupancy 指标。
 
-## 11. 进入 V3 前需要回答
+## 11. V3 Padded Shared Memory Transpose
+
+### 11.1 单变量修改
+
+V3 完整保留 V2 的 Grid、Block、坐标、边界检查、同步和 Global Memory 访问，只修改静态 Shared Memory 声明：
+
+```cpp
+// V2
+__shared__ float tile[32][32];
+
+// V3
+__shared__ float tile[32][33];
+```
+
+有效数据仍使用列 `0–31`；第 33 列只是改变每一行的地址跨度。
+
+### 11.2 Bank 映射
+
+V2 列式读取时，相邻线程地址相差 32 个 word：
+
+```text
+bank = (row × 32 + fixed_column) mod 32
+     = fixed_column
+```
+
+因此不同 row 会落到相同 Bank。V3 的行跨度变成 33：
+
+```text
+bank = (row × 33 + fixed_column) mod 32
+     = (row + fixed_column) mod 32
+```
+
+相邻 row 轮换到相邻 Bank。该推导解释 Padding 的设计意图；当前容器仍无法通过 NCU 读取实际 Bank Conflict 计数器。
+
+### 11.3 资源变化
+
+V2 每个 Block 使用 `32 × 32 × 4 = 4096` bytes 静态 Shared Memory；V3 使用 `32 × 33 × 4 = 4224` bytes，只增加 128 bytes。NSYS 应在 `cuda_gpu_trace` 中显示 Static Shared Memory 从约 `0.004096 MB` 增加到约 `0.004224 MB`。
+
+### 11.4 验收命令
+
+```bash
+./build/transpose_v3 --kernel padded --shape 31x33
+ctest --test-dir build --output-on-failure
+compute-sanitizer --tool memcheck ./build/transpose_test
+compute-sanitizer --tool racecheck ./build/transpose_test
+./build/transpose_bench --kernel all --shape 4096x4096 --warmup 20 --iterations 100 --groups 5
+./scripts/profile_nsys.sh padded
+```
+
+未来在允许性能计数器的环境中运行：
+
+```bash
+./scripts/profile_ncu.sh tiled
+./scripts/profile_ncu.sh padded
+```
+
+### 11.5 预览结果
+
+提交前的 4096×4096 预览中，Tiled P50 为 `168.264 us`，Padded P50 为 `166.042 us`，Padding 暂时显示约 `1.34%` 的 Kernel 时间改善。该数字只用于检查优化方向；正式结论要在提交实现后重新构建并生成 commit-aware CSV。
+
+## 12. Transpose 口头验收问题
 
 1. Naive Transpose 是读不连续还是写不连续？
 2. Shared Memory 为什么能让 Global Load 和 Store 同时连续？
 3. 为什么 `__syncthreads()` 不能只放在边界判断内部？
 4. 为什么 `tile[32][32]` 的转置读会发生 Bank Conflict？
-5. NSYS 能验证 V2 的哪些事实，又不能验证哪些微架构指标？
+5. 为什么 `tile[32][33]` 会改变 Bank 映射？
+6. NSYS 能验证哪些事实，又不能验证哪些微架构指标？

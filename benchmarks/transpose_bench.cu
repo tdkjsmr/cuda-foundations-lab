@@ -25,7 +25,7 @@
 
 namespace {
 
-// 三个 Kernel 的 Host 启动函数签名一致，可共享同一套 Benchmark 流程。
+// 四个 Kernel 的 Host 启动函数签名一致，可共享同一套 Benchmark 流程。
 using LaunchFunction = void (*)(const float*,
                                 float*,
                                 std::size_t,
@@ -102,8 +102,9 @@ Options parse_options(int argc, char** argv) {
         if (argument == "--kernel" && index + 1 < argc) {
             options.kernel_name = argv[++index];
             if (options.kernel_name != "copy" && options.kernel_name != "naive" &&
-                options.kernel_name != "tiled" && options.kernel_name != "all") {
-                throw std::invalid_argument("--kernel 只支持 copy、naive、tiled 或 all");
+                options.kernel_name != "tiled" && options.kernel_name != "padded" &&
+                options.kernel_name != "all") {
+                throw std::invalid_argument("--kernel 只支持 copy、naive、tiled、padded 或 all");
             }
         } else if (argument == "--shape" && index + 1 < argc) {
             const auto shape = parse_shape(argv[++index]);
@@ -126,7 +127,7 @@ Options parse_options(int argc, char** argv) {
 
     // Profile 模式只允许选择一个 Kernel，避免时间线或报告混入另一版本。
     if (options.profile_mode && options.kernel_name == "all") {
-        throw std::invalid_argument("--profile 必须配合 --kernel copy、naive 或 tiled");
+        throw std::invalid_argument("--profile 必须配合 --kernel copy、naive、tiled 或 padded");
     }
 
     // Profile 模式在预热后只留下一个正式 Launch，减少报告中的重复事件。
@@ -138,7 +139,7 @@ Options parse_options(int argc, char** argv) {
     return options;
 }
 
-// 根据 --kernel 生成有确定顺序的待测列表；all 始终按 Copy、Naive、Tiled 顺序测量。
+// 根据 --kernel 生成有确定顺序的待测列表；all 始终按 Copy、Naive、Tiled、Padded 顺序测量。
 std::vector<KernelSpec> selected_kernels(const std::string& kernel_name) {
     const KernelSpec copy{
         "copy_v0", cuda_foundations::transpose::launch_copy, false};
@@ -146,6 +147,8 @@ std::vector<KernelSpec> selected_kernels(const std::string& kernel_name) {
         "naive_v1", cuda_foundations::transpose::launch_naive, true};
     const KernelSpec tiled{
         "tiled_v2", cuda_foundations::transpose::launch_tiled, true};
+    const KernelSpec padded{
+        "padded_v3", cuda_foundations::transpose::launch_padded, true};
 
     if (kernel_name == "copy") {
         return {copy};
@@ -156,7 +159,10 @@ std::vector<KernelSpec> selected_kernels(const std::string& kernel_name) {
     if (kernel_name == "tiled") {
         return {tiled};
     }
-    return {copy, naive, tiled};
+    if (kernel_name == "padded") {
+        return {padded};
+    }
+    return {copy, naive, tiled, padded};
 }
 
 // 生成 UTC ISO-8601 时间戳，避免不同服务器时区导致 CSV 难以对齐。
@@ -250,7 +256,7 @@ KernelResult benchmark_kernel(const KernelSpec& spec,
     const cuda_foundations::benchmark::Summary summary =
         cuda_foundations::benchmark::summarize(group_average_us);
 
-    // 三个版本都读取并写入同样数量的 FP32 元素，因此使用相同有效字节数定义。
+    // 四个版本都读取并写入同样数量的 FP32 元素，因此使用相同有效字节数定义。
     const double transferred_bytes = 2.0 * static_cast<double>(byte_count);
     const double bandwidth_gbps =
         transferred_bytes / (summary.median * 1.0e-6) / 1.0e9;
@@ -258,7 +264,7 @@ KernelResult benchmark_kernel(const KernelSpec& spec,
     return KernelResult{spec, summary, bandwidth_gbps, 0.0, 0.0};
 }
 
-// 在同时测得 V0/V1/V2 后计算相对 Copy 带宽比例和相对 Naive 加速比。
+// 在同时测得 V0/V1/V2/V3 后计算相对 Copy 带宽比例和相对 Naive 加速比。
 void compute_relative_metrics(std::vector<KernelResult>* results) {
     const KernelResult* copy_result = nullptr;
     const KernelResult* naive_result = nullptr;
@@ -389,7 +395,7 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaMemcpy(
             device_input, host_input.data(), byte_count, cudaMemcpyHostToDevice));
 
-        // 按固定顺序执行所选版本；正式 all 模式会得到可直接比较的 V0/V1/V2 结果。
+        // 按固定顺序执行所选版本；正式 all 模式会得到可直接比较的 V0/V1/V2/V3 结果。
         std::vector<KernelResult> results;
         for (const KernelSpec& spec : selected_kernels(options.kernel_name)) {
             results.push_back(benchmark_kernel(

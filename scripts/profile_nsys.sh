@@ -9,16 +9,17 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 当前服务器的 nsys 未加入 PATH，因此默认使用已验证的绝对路径。
 nsys_bin="${NSYS_BIN:-/opt/nvidia/nsight-compute/2024.1.1/host/target-linux-x64/nsys}"
 
-# 第一个位置参数选择 copy、naive 或 tiled；默认分析本版本新增的 tiled。
-kernel_name="${1:-tiled}"
+# 第一个位置参数选择 copy、naive、tiled 或 padded；默认分析本版本新增的 padded。
+kernel_name="${1:-padded}"
 if [[ "${kernel_name}" != "copy" && "${kernel_name}" != "naive" &&
-    "${kernel_name}" != "tiled" ]]; then
-    echo "用法: $0 [copy|naive|tiled]" >&2
+    "${kernel_name}" != "tiled" &&
+    "${kernel_name}" != "padded" ]]; then
+    echo "用法: $0 [copy|naive|tiled|padded]" >&2
     exit 1
 fi
 
 # 不启用 GPU Metrics Sampling，只采集当前容器已验证可用的 CUDA/NVTX/OSRT 时间线。
-report_base="${repo_root}/results/nsys/transpose_v2_${kernel_name}"
+report_base="${repo_root}/results/nsys/transpose_v3_${kernel_name}"
 "${nsys_bin}" profile \
     --trace=cuda,nvtx,osrt \
     --sample=none \

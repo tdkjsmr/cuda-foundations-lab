@@ -9,16 +9,17 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 优先使用 PATH 中的 ncu；当前服务器通常位于 /usr/local/cuda/bin/ncu。
 ncu_bin="${NCU_BIN:-/usr/local/cuda/bin/ncu}"
 
-# 第一个参数选择待分析版本；默认针对 v1.2 新增的 tiled。
-kernel_name="${1:-tiled}"
+# 第一个参数选择待分析版本；默认针对 v1.3 新增的 padded。
+kernel_name="${1:-padded}"
 if [[ "${kernel_name}" != "copy" && "${kernel_name}" != "naive" &&
-      "${kernel_name}" != "tiled" ]]; then
-    echo "用法: $0 [copy|naive|tiled]" >&2
+      "${kernel_name}" != "tiled" &&
+      "${kernel_name}" != "padded" ]]; then
+    echo "用法: $0 [copy|naive|tiled|padded]" >&2
     exit 1
 fi
 
 # 报告名称绑定当前 Transpose 阶段和 Kernel，避免覆盖不同版本的证据。
-report_base="${repo_root}/results/ncu/transpose_v2_${kernel_name}"
+report_base="${repo_root}/results/ncu/transpose_v3_${kernel_name}"
 
 # 程序先执行 20 次 Warm-up；NCU 跳过它们，只采集随后唯一一次正式 Kernel。
 "${ncu_bin}" \

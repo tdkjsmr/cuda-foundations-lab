@@ -39,4 +39,11 @@ void launch_tiled(const float* device_input,
                   std::size_t height,
                   cudaStream_t stream = nullptr);
 
+// 启动 V3 Padded Shared Memory Transpose；第二维增加一列以改变 Bank 映射。
+void launch_padded(const float* device_input,
+                   float* device_output,
+                   std::size_t width,
+                   std::size_t height,
+                   cudaStream_t stream = nullptr);
+
 }  // namespace cuda_foundations::transpose

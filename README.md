@@ -48,8 +48,8 @@ docs/                       中文实现与性能分析报告
 - CPU Reference：double 串行累加；
 - 误差：absolute error、normalized error 和输入相关 tolerance；
 - 测试：覆盖全部规定 N 与五种数据分布；
-- Benchmark：V1 在 N=1,000,003 和 16,777,219 上分别较 V0 加速 1.383× 和 1.643×；
-- NSYS：V1 三阶段结构已验证，报告与命令行 CSV 已归档；NCU 仍受容器权限限制。
+- Benchmark：V2 在 N=1,000,003 和 16,777,219 上分别较 V1 加速 1.474× 和 1.884×；
+- NSYS：V2 的 `1954 → 4 → 1` 三阶段结构已验证，报告与命令行 CSV 已归档；NCU 仍受容器权限限制。
 
 ## 配置、构建和运行
 
@@ -102,6 +102,7 @@ Reduction V0/V1/V2：
 - [性能报告](docs/02_reduction_report.md)：算法、测试、正式数据与 NSYS 阶段分析；
 - [V0 原始数据](results/raw/reduction_v0.csv) 与 `results/nsys/reduction_v0_interleaved*`。
 - [V1 对比数据](results/raw/reduction_v1_comparison.csv) 与 `results/nsys/reduction_v1_sequential*`。
+- [V2 对比数据](results/raw/reduction_v2_comparison.csv) 与 `results/nsys/reduction_v2_first_add*`。
 
 ## Profiler 证据边界
 

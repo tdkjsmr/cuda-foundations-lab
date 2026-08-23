@@ -16,6 +16,9 @@ endif()
 
 include(CTest)
 
+# Stream Profiler 路径使用 CUDA Toolkit 自带的 NVTX 标注库。
+find_package(CUDAToolkit REQUIRED)
+
 find_package(Git QUIET)
 if(Git_FOUND)
     execute_process(
@@ -85,7 +88,36 @@ target_compile_definitions(
 )
 configure_cuda_target(reduction_bench)
 
+add_library(stream_core OBJECT src/streams/stream_pipeline.cu)
+target_compile_definitions(stream_core PRIVATE CUDA_FOUNDATIONS_STREAM_CORE_ONLY=1)
+target_link_libraries(stream_core PRIVATE CUDA::nvToolsExt)
+configure_cuda_target(stream_core)
+
+add_executable(stream_pipeline src/streams/stream_pipeline.cu)
+target_link_libraries(stream_pipeline PRIVATE CUDA::nvToolsExt)
+configure_cuda_target(stream_pipeline)
+
+add_executable(stream_test
+    tests/stream_test.cu
+    $<TARGET_OBJECTS:stream_core>
+)
+target_link_libraries(stream_test PRIVATE CUDA::nvToolsExt)
+configure_cuda_target(stream_test)
+
+add_executable(stream_bench
+    benchmarks/stream_bench.cu
+    $<TARGET_OBJECTS:stream_core>
+)
+target_compile_definitions(
+    stream_bench
+    PRIVATE CUDA_FOUNDATIONS_GIT_COMMIT="${CUDA_FOUNDATIONS_GIT_COMMIT}"
+)
+target_link_libraries(stream_bench PRIVATE CUDA::nvToolsExt)
+configure_cuda_target(stream_bench)
+
 if(BUILD_TESTING)
     add_test(NAME transpose_correctness COMMAND transpose_test)
     add_test(NAME reduction_v0_v1_v2_v3_correctness COMMAND reduction_test)
+    add_test(NAME stream_v0_pageable_sync_correctness COMMAND stream_test)
+    set_tests_properties(stream_v0_pageable_sync_correctness PROPERTIES TIMEOUT 120)
 endif()

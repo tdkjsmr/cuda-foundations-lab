@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+
+# Nsight Systems、目标程序或任何统计导出失败时立即退出。
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+nsys_bin="${NSYS_BIN:-/opt/nvidia/nsight-compute/2024.1.1/host/target-linux-x64/nsys}"
+report_dir="${repo_root}/results/nsys"
+report_base="${report_dir}/stream_v0_pageable_sync"
+mkdir -p "${report_dir}"
+
+# 预热在 CUDA Profiler API capture-range 之外；报告只保留一次 512 MiB 正式 Pipeline。
+"${nsys_bin}" profile \
+    --trace=cuda,nvtx,osrt \
+    --sample=none \
+    --capture-range=cudaProfilerApi \
+    --capture-range-end=stop \
+    --stats=false \
+    --force-overwrite=true \
+    --output "${report_base}" \
+    "${repo_root}/build/stream_bench" \
+    --mode pageable_sync \
+    --shape 4096x2048 \
+    --chunks 16 \
+    --streams 1 \
+    --warmup 1 \
+    --profile
+
+# 终端报告同时展示 Host API、GPU Kernel、Memcpy 汇总、逐事件时间线和 NVTX 范围。
+"${nsys_bin}" stats \
+    --report cuda_api_sum \
+    --report cuda_gpu_kern_sum \
+    --report cuda_gpu_mem_time_sum \
+    --report cuda_gpu_trace \
+    --report nvtx_pushpop_sum \
+    --report nvtx_gpu_proj_sum \
+    --format column \
+    --force-export=true \
+    --output - \
+    "${report_base}.nsys-rep"
+
+# 再导出同一组 CSV 汇总，用于 V3.1/V3.2 逐字段比较。
+"${nsys_bin}" stats \
+    --report cuda_api_sum \
+    --report cuda_gpu_kern_sum \
+    --report cuda_gpu_mem_time_sum \
+    --report cuda_gpu_trace \
+    --report nvtx_pushpop_sum \
+    --report nvtx_gpu_proj_sum \
+    --format csv \
+    --output "${report_base}" \
+    --force-export=true \
+    --force-overwrite=true \
+    "${report_base}.nsys-rep"

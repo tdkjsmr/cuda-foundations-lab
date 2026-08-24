@@ -2,13 +2,13 @@
 
 这是 OLCF CUDA Training Series 阶段收尾项目，目标是建立“正确性、稳定测量、Profiler 证据、单变量迭代”的 CUDA 性能工程闭环。
 
-当前开发分支：`v3.0`。
+当前开发分支：`v3.1`。
 
 Transpose 子项目最终分支：`v1.3`。
 
 Reduction 子项目最终分支：`v2.3`。
 
-Stream 子项目当前分支：`v3.0`（Pageable + Synchronous 基线）。
+Stream 子项目当前分支：`v3.1`（Pinned + Synchronous，GPU 验收已完成）。
 
 当前保留四个 Transpose 版本：
 
@@ -28,7 +28,8 @@ src/reduction/reduction.cu  V0/V1/V2/V3 Kernel、GPU 多阶段控制和演示 ma
 src/streams/stream_pipeline.cu  Padded Transpose Kernel、同步 Pipeline 和演示 main
 tests/transpose_test.cu     CPU Reference、正确性、边界和特殊位模式测试
 tests/reduction_test.cu     规定 N、数据分布、误差与多阶段测试
-tests/stream_test.cu        多 Chunk、边界、位模式、溢出和所有权测试
+tests/stream_test.cu        Pageable Sync 正确性、边界、位模式和所有权测试
+tests/stream_pinned_test.cu Pinned Pointer 属性、正确性、位模式和所有权测试
 benchmarks/                 Transpose/Reduction Kernel-only 与 Stream E2E Benchmark
 scripts/                    测试、Benchmark、NCU/NSYS 命令
 results/                    原始 CSV 与 Profiler 报告
@@ -57,16 +58,16 @@ docs/                       中文实现与性能分析报告
 - Benchmark：V3 在 N=1,000,003 和 16,777,219 上分别较 V2 加速 1.394× 和 1.382×；
 - NSYS：V3 保持 `1954 → 4 → 1`，三阶段均加速，18 次 Kernel 总时间较 V2 提升 1.426×；NCU 仍受容器权限限制。
 
-## Stream 当前状态（V0）
+## Stream 当前状态（V0/V1）
 
 - 工作负载：复用 Padded Tiled Transpose，完整覆盖 H2D + Kernel + D2H；
-- Host Memory：普通 `std::vector` Pageable Memory；
+- V0：普通 `std::vector` Pageable Memory，正确性、Sanitizer、Benchmark 和 NSYS 已验收；
+- V1：使用 `cudaMallocHost()` 分配 Pinned Input/Output，编译、CTest、正确性和 Sanitizer 已通过；
 - 提交方式：blocking `cudaMemcpy` + 默认 Stream，严格串行；
 - 公平性：8/32/64 MiB Chunk 均固定 512 MiB 总输入 Payload；
 - 测量：同时记录 CPU Submit、CUDA Event GPU Span 和 steady-clock End-to-end；
-- 正确性：多 Chunk 与特殊 IEEE-754 位模式逐位通过；
-- 安全性：`memcheck` 0 errors，`leak-check` 0 bytes；
-- NSYS：16 组 H2D → Kernel → D2H 完全串行，作为后续重叠实验的时间线基线。
+- V1 安全性：`memcheck` 为 0 errors、0 bytes leaked；
+- V1 NSYS：32 次同步拷贝共 44.204 ms，16 次 Kernel 共 1.296 ms，仍保持串行，作为后续重叠实验的时间线基线。
 
 ## 配置、构建和运行
 
@@ -89,10 +90,14 @@ cmake --build build -j
 ./scripts/run_reduction_v3_benchmarks.sh
 ./scripts/profile_reduction_v3_nsys.sh
 
-./build/stream_pipeline --shape 31x33 --chunks 3
+./build/stream_pipeline --mode pinned_sync --shape 31x33 --chunks 3
+./build/stream_pinned_test
 ./build/stream_bench --mode pageable_sync --shape 4096x2048 --chunks 16 --streams 1
+./build/stream_bench --mode pinned_sync --shape 4096x2048 --chunks 16 --streams 1
 ./scripts/run_stream_v0_benchmarks.sh
 ./scripts/profile_stream_v0_nsys.sh
+./scripts/run_stream_v1_benchmarks.sh
+./scripts/profile_stream_v1_nsys.sh
 ```
 
 ## 版本演进
@@ -108,6 +113,7 @@ cmake --build build -j
 | `v2.2` | First Add During Load | 每线程合并两个输入，减少 Block 和 Partial Sums |
 | `v2.3` | Warp Shuffle Reduction | 用 Register Shuffle 完成最后一个 Warp，减少 Shared 访问与 Block 屏障 |
 | `v3.0` | Pageable Synchronous Stream Baseline | 普通 Host Memory + blocking H2D/Kernel/D2H 串行基线 |
+| `v3.1` | Pinned Synchronous Stream Baseline | 只把 Host Allocation 改为 `cudaMallocHost()`，GPU 验收已完成 |
 
 ## 当前交付物
 
@@ -129,13 +135,14 @@ Reduction V0/V1/V2/V3：
 - [V2 对比数据](results/raw/reduction_v2_comparison.csv) 与 `results/nsys/reduction_v2_first_add*`。
 - [V3 四版本对比数据](results/raw/reduction_v3_comparison.csv) 与 `results/nsys/reduction_v3_warp_shuffle*`。
 
-Stream V0：
+Stream V0/V1：
 
-- [统一源码](src/streams/stream_pipeline.cu)：Padded Kernel、同步 Host Pipeline、NVTX 和演示 `main()`；
-- [正确性测试](tests/stream_test.cu)：多 Chunk、非整除 Shape、特殊位模式、溢出和 Move-only 所有权；
-- [端到端 Benchmark](benchmarks/stream_bench.cu)：CPU Submit、GPU Span、End-to-end、统计量和 CSV；
+- [统一源码](src/streams/stream_pipeline.cu)：Padded Kernel、Pageable/Pinned 同步 Host Pipeline、NVTX 和演示 `main()`；
+- [正确性测试](tests/stream_test.cu) 与 [Pinned 测试](tests/stream_pinned_test.cu)：多 Chunk、Pointer 属性、位模式和 Move-only 所有权；
+- [端到端 Benchmark](benchmarks/stream_bench.cu)：两种同步模式共用计时、统计和 CSV Schema；
 - [阶段报告](docs/03_stream_report.md)：固定实验合同、正式结果、NSYS 分析顺序与验收答案；
 - [V0 原始数据](results/raw/stream_v0_pageable_sync.csv) 与 `results/nsys/stream_v0_pageable_sync*`。
+- V1 NSYS 报告和命令行统计已经归档；正式 20×100×5 CSV 尚未生成，不以短 Benchmark 输出替代。
 
 ## Profiler 证据边界
 

@@ -165,7 +165,7 @@ DeviceCapabilities query_device_capabilities() {
     cudaDeviceProp properties{};
     CUDA_CHECK(cudaGetDeviceProperties(&properties, device_id));
 
-    // 能力为 0 时 V3.0 同步基线仍然可以正常运行。
+    // 能力为 0 时 V3.0/V3.1 同步基线仍然可以正常运行。
     return DeviceCapabilities{
         device_id,
         properties.name,
@@ -201,6 +201,36 @@ DeviceBufferPair& DeviceBufferPair::operator=(DeviceBufferPair&& other) noexcept
 DeviceBufferPair::~DeviceBufferPair() {
     // 显式 release 后指针已经清空；遗漏显式清理时析构仍会提供兜底回收。
     release_device_buffers(this);
+}
+
+PinnedHostBufferPair::PinnedHostBufferPair(PinnedHostBufferPair&& other) noexcept
+    : input(other.input),
+      output(other.output),
+      capacity_bytes(other.capacity_bytes) {
+    // Move Construction 后源对象不再拥有任何 Page-locked Host Memory。
+    other.input = nullptr;
+    other.output = nullptr;
+    other.capacity_bytes = 0U;
+}
+
+PinnedHostBufferPair& PinnedHostBufferPair::operator=(
+    PinnedHostBufferPair&& other) noexcept {
+    if (this != &other) {
+        // 先释放目标原有的 Pinned Memory，再接管源对象所有权。
+        release_pinned_host_buffers(this);
+        input = other.input;
+        output = other.output;
+        capacity_bytes = other.capacity_bytes;
+        other.input = nullptr;
+        other.output = nullptr;
+        other.capacity_bytes = 0U;
+    }
+    return *this;
+}
+
+PinnedHostBufferPair::~PinnedHostBufferPair() {
+    // 正常路径显式 release；异常路径由析构兜底调用 cudaFreeHost。
+    release_pinned_host_buffers(this);
 }
 
 DeviceBufferPair allocate_device_buffers(std::size_t capacity_bytes) {
@@ -246,6 +276,53 @@ void release_device_buffers(DeviceBufferPair* buffers) {
     buffers->capacity_bytes = 0U;
 }
 
+PinnedHostBufferPair allocate_pinned_host_buffers(std::size_t capacity_bytes) {
+    // cudaMallocHost(0) 不形成可用 Buffer，因此与 Device 分配一样显式拒绝。
+    if (capacity_bytes == 0U) {
+        throw std::invalid_argument("Pinned Host Buffer 容量必须大于 0");
+    }
+
+    // Input 和 Output 分别拥有 capacity_bytes 字节的 Page-locked Memory。
+    PinnedHostBufferPair buffers{};
+    CUDA_CHECK(cudaMallocHost(
+        reinterpret_cast<void**>(&buffers.input), capacity_bytes));
+
+    // 第二次分配单独保存返回值，以便失败时先回收已经成功的 Input。
+    const cudaError_t output_status = cudaMallocHost(
+        reinterpret_cast<void**>(&buffers.output), capacity_bytes);
+    if (output_status != cudaSuccess) {
+        CUDA_CHECK(cudaFreeHost(buffers.input));
+        buffers.input = nullptr;
+        CUDA_CHECK(output_status);
+    }
+
+    // capacity_bytes 表示每一块 Host Buffer 的容量，不是两块之和。
+    buffers.capacity_bytes = capacity_bytes;
+    return buffers;
+}
+
+void release_pinned_host_buffers(PinnedHostBufferPair* buffers) {
+    // 所有者指针为空属于调用错误；空资源对象本身则允许重复 release。
+    if (buffers == nullptr) {
+        throw std::invalid_argument("release_pinned_host_buffers 收到空所有者指针");
+    }
+
+    // 按分配逆序先释放 Output，cudaFreeHost 只用于 Page-locked Host Pointer。
+    if (buffers->output != nullptr) {
+        CUDA_CHECK(cudaFreeHost(buffers->output));
+        buffers->output = nullptr;
+    }
+
+    // 再释放 Input，保证正常路径和 Move Assignment 都不会泄漏 Pinned 页。
+    if (buffers->input != nullptr) {
+        CUDA_CHECK(cudaFreeHost(buffers->input));
+        buffers->input = nullptr;
+    }
+
+    // 两个指针都清空后同步清除容量，使已释放对象无法被误用。
+    buffers->capacity_bytes = 0U;
+}
+
 void launch_padded_tiled_transpose(const float* input,
                                   float* output,
                                   std::size_t width,
@@ -269,7 +346,7 @@ void launch_padded_tiled_transpose(const float* input,
     const dim3 grid(
         static_cast<unsigned int>(grid_x), static_cast<unsigned int>(grid_y), 1U);
 
-    // V3.0 传入 nullptr，因此 Kernel 位于默认 Stream；V3.2 将显式传入非默认 Stream。
+    // V3.0/V3.1 传 nullptr 使用默认 Stream；V3.2 才显式使用非默认 Stream。
     stream_padded_transpose_kernel<<<grid, block, 0U, stream>>>(
         input, output, width, height);
 
@@ -320,7 +397,7 @@ void execute_synchronous_pipeline(const StreamWorkload& workload,
         const float* host_chunk_input = host_input + chunk_offset;
         float* host_chunk_output = host_output + chunk_offset;
 
-        // Baseline A 必须使用 blocking cudaMemcpy 和 Pageable Host Memory。
+        // Baseline A/B 都使用 blocking cudaMemcpy；唯一差别由 Host 指针来源决定。
         begin_nvtx_range("h2d", annotate_nvtx);
         CUDA_CHECK(cudaMemcpy(buffers.input,
                               host_chunk_input,
@@ -358,6 +435,7 @@ namespace {
 
 // 演示程序默认使用较小工作量，正式 512 MiB 实验由 Benchmark 脚本运行。
 struct DemoOptions {
+    std::string mode = "pinned_sync";
     cuda_foundations::streams::StreamWorkload workload{1024U, 1024U, 4U};
 };
 
@@ -405,12 +483,14 @@ std::size_t parse_positive_size(const std::string& text, const char* option_name
     return static_cast<std::size_t>(parsed);
 }
 
-// 演示程序只允许改变矩阵 Shape 和 Chunk 数。
+// 演示程序保留 V3.0/V3.1 两种同步模式，并允许改变 Shape 和 Chunk 数。
 DemoOptions parse_options(int argc, char** argv) {
     DemoOptions options;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
-        if (argument == "--shape" && index + 1 < argc) {
+        if (argument == "--mode" && index + 1 < argc) {
+            options.mode = argv[++index];
+        } else if (argument == "--shape" && index + 1 < argc) {
             const auto [width, height] = parse_shape(argv[++index]);
             options.workload.width = width;
             options.workload.height = height;
@@ -420,12 +500,15 @@ DemoOptions parse_options(int argc, char** argv) {
             throw std::invalid_argument("未知或缺少值的参数: " + argument);
         }
     }
+    if (options.mode != "pageable_sync" && options.mode != "pinned_sync") {
+        throw std::invalid_argument("--mode 只支持 pageable_sync 或 pinned_sync");
+    }
     return options;
 }
 
 // 为整批独立矩阵构造 CPU Transpose Reference。
 std::vector<float> make_batch_reference(
-    const std::vector<float>& input,
+    const float* input,
     const cuda_foundations::streams::StreamWorkload& workload,
     const cuda_foundations::streams::WorkloadLayout& layout) {
     // Reference 与 Host Output 使用相同的连续 Chunk 布局。
@@ -453,9 +536,27 @@ int main(int argc, char** argv) {
         const cuda_foundations::streams::WorkloadLayout layout =
             cuda_foundations::streams::validate_and_derive_layout(options.workload);
 
-        // std::vector 保证 V3.0 的 Host Buffer 是普通 Pageable Memory。
-        std::vector<float> host_input(layout.total_elements, 0.0F);
-        std::vector<float> host_output(layout.total_elements, 0.0F);
+        // V3.1 默认使用 cudaMallocHost；保留 Pageable 模式用于同一二进制回归。
+        const bool use_pinned_memory = options.mode == "pinned_sync";
+        std::vector<float> pageable_input;
+        std::vector<float> pageable_output;
+        cuda_foundations::streams::PinnedHostBufferPair pinned_buffers{};
+        float* host_input = nullptr;
+        float* host_output = nullptr;
+
+        if (use_pinned_memory) {
+            // 两块 Pinned Buffer 均覆盖完整 Batch，分配发生在 Pipeline 之外。
+            pinned_buffers = cuda_foundations::streams::allocate_pinned_host_buffers(
+                layout.total_bytes);
+            host_input = pinned_buffers.input;
+            host_output = pinned_buffers.output;
+        } else {
+            // V3.0 路径继续由 std::vector 提供普通 Pageable Host Memory。
+            pageable_input.assign(layout.total_elements, 0.0F);
+            pageable_output.assign(layout.total_elements, 0.0F);
+            host_input = pageable_input.data();
+            host_output = pageable_output.data();
+        }
 
         // 把 Chunk 编号纳入模式，避免错误重复 Chunk 0 仍然通过验证。
         for (std::size_t chunk = 0U; chunk < options.workload.chunk_count; ++chunk) {
@@ -479,8 +580,8 @@ int main(int argc, char** argv) {
         cuda_foundations::streams::execute_synchronous_pipeline(
             options.workload,
             layout,
-            host_input.data(),
-            host_output.data(),
+            host_input,
+            host_output,
             buffers,
             false);
 
@@ -488,15 +589,20 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaDeviceSynchronize());
 
         // Transpose 只重排位模式，因此对 NaN 也使用逐位验证。
+        const std::vector<float> actual_output(
+            host_output, host_output + layout.total_elements);
         std::string error_message;
         const bool correct = cuda_foundations::test::bitwise_equal(
-            host_output, host_reference, &error_message);
+            actual_output, host_reference, &error_message);
 
-        // 无论验证是否通过，先释放本进程拥有的 Device Buffer。
+        // 正常路径按 Device 后 Host 的逆序释放；RAII 仍为异常路径兜底。
         cuda_foundations::streams::release_device_buffers(&buffers);
+        if (use_pinned_memory) {
+            cuda_foundations::streams::release_pinned_host_buffers(&pinned_buffers);
+        }
 
         if (!correct) {
-            std::cerr << "Stream V3.0 验证失败: " << error_message << std::endl;
+            std::cerr << "Stream V3.1 验证失败: " << error_message << std::endl;
             return EXIT_FAILURE;
         }
 
@@ -504,8 +610,13 @@ int main(int argc, char** argv) {
         const cuda_foundations::streams::DeviceCapabilities capabilities =
             cuda_foundations::streams::query_device_capabilities();
 
-        std::cout << "Pipeline: pageable_sync_v0\n"
-                  << "Host memory: Pageable (std::vector)\n"
+        const char* pipeline_name =
+            use_pinned_memory ? "pinned_sync_v1" : "pageable_sync_v0";
+        const char* host_memory_name = use_pinned_memory
+                                           ? "Pinned (cudaMallocHost)"
+                                           : "Pageable (std::vector)";
+        std::cout << "Pipeline: " << pipeline_name << '\n'
+                  << "Host memory: " << host_memory_name << '\n'
                   << "Copy API: cudaMemcpy (blocking)\n"
                   << "Kernel: stream_padded_transpose_kernel\n"
                   << "Shape/chunk: " << options.workload.width << 'x'
@@ -524,8 +635,8 @@ int main(int argc, char** argv) {
                   << "Bitwise correctness: PASS" << std::endl;
         return EXIT_SUCCESS;
     } catch (const std::exception& exception) {
-        // CLI、容量或 Host 验证失败时输出具体原因。
-        std::cerr << "Stream V3.0 程序失败: " << exception.what() << std::endl;
+        // CLI、容量、Pinned Allocation 或 Host 验证失败时输出具体原因。
+        std::cerr << "Stream V3.1 程序失败: " << exception.what() << std::endl;
         return EXIT_FAILURE;
     }
 }

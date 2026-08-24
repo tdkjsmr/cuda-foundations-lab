@@ -28,7 +28,7 @@ struct WorkloadLayout {
     std::size_t total_bytes = 0U;
 };
 
-// V3.0 同步基线复用一对 Chunk-sized Device Buffer。
+// V3.0/V3.1 同步基线复用一对 Chunk-sized Device Buffer。
 struct DeviceBufferPair {
     float* input = nullptr;
     float* output = nullptr;
@@ -40,6 +40,21 @@ struct DeviceBufferPair {
     DeviceBufferPair& operator=(const DeviceBufferPair&) = delete;
     DeviceBufferPair(DeviceBufferPair&& other) noexcept;
     DeviceBufferPair& operator=(DeviceBufferPair&& other) noexcept;
+};
+
+// V3.1 用一对整批大小的 Pinned Host Buffer 替换 std::vector Pageable Buffer。
+struct PinnedHostBufferPair {
+    float* input = nullptr;
+    float* output = nullptr;
+    std::size_t capacity_bytes = 0U;
+
+    // Pinned Memory 是独占资源，因此禁止复制，只允许安全转移所有权。
+    PinnedHostBufferPair() = default;
+    ~PinnedHostBufferPair();
+    PinnedHostBufferPair(const PinnedHostBufferPair&) = delete;
+    PinnedHostBufferPair& operator=(const PinnedHostBufferPair&) = delete;
+    PinnedHostBufferPair(PinnedHostBufferPair&& other) noexcept;
+    PinnedHostBufferPair& operator=(PinnedHostBufferPair&& other) noexcept;
 };
 
 // 这些字段只说明硬件具备潜在并发能力，不是已经发生重叠的证据。
@@ -63,6 +78,12 @@ DeviceBufferPair allocate_device_buffers(std::size_t capacity_bytes);
 // 在正常路径中逆序释放 Device Buffer，并将指针清空。
 void release_device_buffers(DeviceBufferPair* buffers);
 
+// 使用 cudaMallocHost 为整批 Input/Output 分配 Page-locked Host Memory。
+PinnedHostBufferPair allocate_pinned_host_buffers(std::size_t capacity_bytes);
+
+// 使用 cudaFreeHost 逆序释放两块 Pinned Buffer，并清空所有权状态。
+void release_pinned_host_buffers(PinnedHostBufferPair* buffers);
+
 // 启动从 Transpose V3 冻结下来的 Padded Tiled Kernel。
 void launch_padded_tiled_transpose(const float* input,
                                   float* output,
@@ -70,7 +91,7 @@ void launch_padded_tiled_transpose(const float* input,
                                   std::size_t height,
                                   cudaStream_t stream = nullptr);
 
-// 依次对每个 Chunk 执行 blocking H2D -> Kernel -> blocking D2H。
+// 对 Pageable 或 Pinned Host 指针执行相同的 blocking H2D -> Kernel -> D2H。
 void execute_synchronous_pipeline(const StreamWorkload& workload,
                                   const WorkloadLayout& layout,
                                   const float* host_input,

@@ -1,0 +1,49 @@
+Start (ns),Duration (ns),CorrId,GrdX,GrdY,GrdZ,BlkX,BlkY,BlkZ,Reg/Trd,StcSMem (MB),DymSMem (MB),Bytes (MB),Throughput (MB/s),SrcMemKd,DstMemKd,Device,Ctx,GreenCtx,Strm,Name
+13828002,1324459,19,,,,,,,,,,33.554,25333.596,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+15206252,80767,20,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+15292779,1349707,22,,,,,,,,,,33.554,24830.280,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+16664982,1324235,23,,,,,,,,,,33.554,25333.596,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+18000481,81503,24,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+18088640,1339659,26,,,,,,,,,,33.554,25031.606,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+19437099,1324523,27,,,,,,,,,,33.554,25300.042,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+20771670,81055,28,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+20854069,1339691,30,,,,,,,,,,33.554,25031.606,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+22202176,1324427,31,,,,,,,,,,33.554,25333.596,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+23535787,80959,32,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+23624297,1336108,34,,,,,,,,,,33.554,25098.715,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+24969045,1324907,35,,,,,,,,,,33.554,25300.042,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+26303360,81023,36,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+26388671,1338699,38,,,,,,,,,,33.554,25031.606,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+27736010,1324747,39,,,,,,,,,,33.554,25300.042,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+29069685,81183,40,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+29158932,1334347,42,,,,,,,,,,33.554,25132.270,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+30501343,1324491,43,,,,,,,,,,33.554,25333.596,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+31835178,80991,44,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+31922665,1334987,46,,,,,,,,,,33.554,25132.270,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+33266100,1324907,47,,,,,,,,,,33.554,25300.042,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+34599999,80895,48,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+34687422,1336555,50,,,,,,,,,,33.554,25098.715,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+36032617,1324427,51,,,,,,,,,,33.554,25333.596,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+37365844,80767,52,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+37453203,1335371,54,,,,,,,,,,33.554,25098.715,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+38797470,1324492,55,,,,,,,,,,33.554,25333.596,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+40131145,81759,56,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+40217576,1332267,58,,,,,,,,,,33.554,25165.824,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+41563635,1325963,59,,,,,,,,,,33.554,25300.042,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+42899038,80895,60,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+42986813,1339211,62,,,,,,,,,,33.554,25031.606,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+44336776,1324427,63,,,,,,,,,,33.554,25333.596,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+45670675,81279,64,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+45758738,1337643,66,,,,,,,,,,33.554,25065.161,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+47105053,1324139,67,,,,,,,,,,33.554,25333.596,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+48438312,80863,68,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+48525543,1332683,70,,,,,,,,,,33.554,25165.824,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+49868402,1324587,71,,,,,,,,,,33.554,25300.042,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+51201758,80510,72,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+51289276,1337483,74,,,,,,,,,,33.554,25065.161,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+52638567,1324139,75,,,,,,,,,,33.554,25333.596,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+53972594,81055,76,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+54055697,1334987,78,,,,,,,,,,33.554,25132.270,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]
+55399228,1324108,79,,,,,,,,,,33.554,25333.596,Pinned,Device,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Host-to-Device]
+56733063,80895,80,128,64,1,32,8,1,26,0.004,0.000,,,,,NVIDIA GeForce RTX 3090 (0),1,,7,"cuda_foundations::streams::stream_padded_transpose_kernel(const float *, float *, unsigned long, unsigned long)"
+56817382,1335852,82,,,,,,,,,,33.554,25098.715,Device,Pinned,NVIDIA GeForce RTX 3090 (0),1,,7,[CUDA memcpy Device-to-Host]

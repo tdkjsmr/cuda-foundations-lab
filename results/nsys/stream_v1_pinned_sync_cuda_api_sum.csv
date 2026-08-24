@@ -1,0 +1,6 @@
+Time (%),Total Time (ns),Num Calls,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+99.6,44203529,32,1381360.3,1397602.5,1331464,1431757,47417.8,cudaMemcpy
+0.2,105262,16,6578.9,3843.0,3370,46830,10746.8,cudaLaunchKernel
+0.1,47522,2,23761.0,23761.0,3318,44204,28910.8,cudaEventRecord
+0.0,11187,1,11187.0,11187.0,11187,11187,0.0,cudaDeviceSynchronize
+0.0,8689,1,8689.0,8689.0,8689,8689,0.0,cuProfilerStart

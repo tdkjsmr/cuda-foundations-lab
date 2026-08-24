@@ -412,3 +412,91 @@ std::vector Pageable Allocation
 ```
 
 这样才能回答“只替换 Host Memory 类型，同步传输本身变化多少”。
+
+## 11. V3.1 Pinned + Synchronous 验收
+
+本轮源码在无卡环境完成，随后由用户切换到 GPU 实例执行验收。CMake 配置与编译成功，CTest 100% 通过，V3.1 单独运行报告 `Bitwise correctness: PASS`；Compute Sanitizer 报告 `0 bytes leaked`、`0 errors`。
+
+### 11.1 唯一主要变化
+
+V3.0：
+
+```text
+std::vector<float> Pageable Input/Output
+```
+
+V3.1：
+
+```text
+cudaMallocHost() Pinned Input/Output
+```
+
+以下项目保持完全不变：
+
+- `stream_padded_transpose_kernel`；
+- Grid、Block 和 Shared Memory；
+- blocking `cudaMemcpy()`；
+- 默认 Stream；
+- 每个 Chunk 的 `H2D → Kernel → D2H` 顺序；
+- 一对单 Chunk Device Buffer；
+- 8/32/64 MiB Chunk 和 512 MiB 总 Payload；
+- CPU Submit、GPU Span、End-to-end 和吞吐率定义；
+- 20 次预热、100 次/组、5 组统计。
+
+因此，V3.0/V3.1 的差值只能主要归因于 Host Memory 是否 Page-locked。
+
+### 11.2 Pinned Host Buffer 所有权
+
+```text
+allocate_pinned_host_buffers(total_bytes)
+        ├─ cudaMallocHost(input, total_bytes)
+        └─ cudaMallocHost(output, total_bytes)
+                 │
+                 ├─ 第二次失败：cudaFreeHost(input)
+                 └─ 成功：返回 Move-only PinnedHostBufferPair
+
+正常结束：Device Buffer → Pinned Output → Pinned Input
+异常结束：Move-only RAII Destructor 兜底
+```
+
+`PinnedHostBufferPair` 禁止 Copy，只允许 Move。`capacity_bytes` 表示每一块 Host Buffer 的容量；正式 512 MiB Payload 会锁页约 1 GiB Host Memory，所以分配和释放明确排除在计时区间外，也不能把 Pinned Memory 无限扩大。
+
+### 11.3 正确性测试增量
+
+`stream_pinned_test` 已验证：
+
+- `cudaPointerGetAttributes().type == cudaMemoryTypeHost`；
+- 零容量 Pinned Allocation 被拒绝；
+- Move 后源对象被清空；
+- Release 后 Input、Output 和容量全部清空；
+- 与 Pageable 基线相同的 Tile、非整除矩形、多 Chunk 和 8 MiB Smoke Shape；
+- `+0/-0`、Subnormal、最大有限值、正负无穷和不同 NaN payload 逐位一致。
+
+上述测试已由 GPU 实例实际执行并通过。
+
+### 11.4 Benchmark 与 NSYS 结果
+
+已归档的 NSYS 文件为：
+
+```text
+results/nsys/stream_v1_pinned_sync.nsys-rep
+results/nsys/stream_v1_pinned_sync_*.csv
+```
+
+V3.1 的 NSYS 统计为：
+
+```text
+cudaMemcpy: 32 calls, 44.204 ms
+H2D / D2H: 分别约占拷贝时间的 50.2% / 49.8%
+Kernel:     16 calls, 1.296 ms total, 80.975 us average
+```
+
+V3.0 的 32 次 `cudaMemcpy` 共 121.943 ms；在工作负载、Kernel、同步 API 和默认 Stream 均不变时，V3.1 降至 44.204 ms，即拷贝 API 总时间减少约 63.7%，约为原来的 1/2.76。Kernel 总时间由 1.298 ms 变为 1.296 ms，基本不变，说明收益来自 Pinned Host Memory 消除了 Pageable 路径中的额外暂存，而不是 Kernel 变快。
+
+时间线仍是严格的：
+
+```text
+H2D → Kernel → D2H → H2D → Kernel → D2H
+```
+
+因此 V3.1 是更快的同步基线，但没有产生重叠。正式 20 次预热、100 次/组、5 组的 CSV 尚未生成；本报告不把用户的短 Benchmark 输出冒充正式稳定数据。

@@ -104,6 +104,13 @@ add_executable(stream_test
 target_link_libraries(stream_test PRIVATE CUDA::nvToolsExt)
 configure_cuda_target(stream_test)
 
+add_executable(stream_pinned_test
+    tests/stream_pinned_test.cu
+    $<TARGET_OBJECTS:stream_core>
+)
+target_link_libraries(stream_pinned_test PRIVATE CUDA::nvToolsExt)
+configure_cuda_target(stream_pinned_test)
+
 add_executable(stream_bench
     benchmarks/stream_bench.cu
     $<TARGET_OBJECTS:stream_core>
@@ -119,5 +126,7 @@ if(BUILD_TESTING)
     add_test(NAME transpose_correctness COMMAND transpose_test)
     add_test(NAME reduction_v0_v1_v2_v3_correctness COMMAND reduction_test)
     add_test(NAME stream_v0_pageable_sync_correctness COMMAND stream_test)
+    add_test(NAME stream_v1_pinned_sync_correctness COMMAND stream_pinned_test)
     set_tests_properties(stream_v0_pageable_sync_correctness PROPERTIES TIMEOUT 120)
+    set_tests_properties(stream_v1_pinned_sync_correctness PROPERTIES TIMEOUT 120)
 endif()

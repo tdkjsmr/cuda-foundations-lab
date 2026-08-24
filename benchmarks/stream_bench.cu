@@ -7,6 +7,7 @@
 #include <cuda_profiler_api.h>
 #include <nvtx3/nvToolsExt.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
@@ -28,9 +29,9 @@
 
 namespace {
 
-// 从 V3.0 就冻结后续 Pinned Sync/Async 会共用的 CLI 语义。
+// V3.0/V3.1 共用同一 CLI；V3.2 会继续扩展 async 和多 Stream。
 struct Options {
-    std::string mode = "pageable_sync";
+    std::string mode = "pinned_sync";
     cuda_foundations::streams::StreamWorkload workload{};
     std::size_t stream_count = 1U;
     int warmup_count = 20;
@@ -168,12 +169,13 @@ Options parse_options(int argc, char** argv) {
         }
     }
 
-    // V3.0 只实现 Pageable Sync，显式拒绝未实现模式和虚假的多 Stream 配置。
-    if (options.mode != "pageable_sync") {
-        throw std::invalid_argument("V3.0 --mode 只支持 pageable_sync");
+    // V3.1 保留 Pageable 回归并新增 Pinned Sync，二者都必须保持单 Stream。
+    if (options.mode != "pageable_sync" && options.mode != "pinned_sync") {
+        throw std::invalid_argument(
+            "V3.1 --mode 只支持 pageable_sync 或 pinned_sync");
     }
     if (options.stream_count != 1U) {
-        throw std::invalid_argument("V3.0 Pageable Sync 的 --streams 必须为 1");
+        throw std::invalid_argument("同步 Stream 基线的 --streams 必须为 1");
     }
 
     // Profile 保留用户指定的预热数，但只捕获一次正式 Pipeline。
@@ -217,12 +219,14 @@ std::string csv_escape(const std::string& value) {
 
 // 直接根据 Input 索引检查 Batch Output，避免为 512 MiB 工作量再分配一份 Reference。
 bool validate_batch_transpose(
-    const std::vector<float>& input,
-    const std::vector<float>& output,
+    const float* input,
+    const float* output,
+    std::size_t element_count,
     const cuda_foundations::streams::StreamWorkload& workload,
     const cuda_foundations::streams::WorkloadLayout& layout,
     std::string* error_message) {
-    if (input.size() != layout.total_elements || output.size() != layout.total_elements) {
+    if (input == nullptr || output == nullptr ||
+        element_count != layout.total_elements) {
         if (error_message != nullptr) {
             *error_message = "Stream Benchmark Host Buffer 容量与 Layout 不一致";
         }
@@ -257,16 +261,16 @@ bool validate_batch_transpose(
 BenchmarkResult benchmark_pipeline(
     const Options& options,
     const cuda_foundations::streams::WorkloadLayout& layout,
-    const std::vector<float>& host_input,
-    std::vector<float>* host_output,
+    const float* host_input,
+    float* host_output,
     const cuda_foundations::streams::DeviceBufferPair& buffers) {
     // 预热以一次完整 Batch Pipeline 为单位，不只预热 Kernel。
     for (int iteration = 0; iteration < options.warmup_count; ++iteration) {
         cuda_foundations::streams::execute_synchronous_pipeline(
             options.workload,
             layout,
-            host_input.data(),
-            host_output->data(),
+            host_input,
+            host_output,
             buffers,
             false);
     }
@@ -298,8 +302,8 @@ BenchmarkResult benchmark_pipeline(
             cuda_foundations::streams::execute_synchronous_pipeline(
                 options.workload,
                 layout,
-                host_input.data(),
-                host_output->data(),
+                host_input,
+                host_output,
                 buffers,
                 options.profile_mode);
         }
@@ -331,7 +335,12 @@ BenchmarkResult benchmark_pipeline(
     // 在所有异步工作完成后才读取 Host Output 并与 CPU 索引关系对比。
     std::string error_message;
     const bool bitwise_correct = validate_batch_transpose(
-        host_input, *host_output, options.workload, layout, &error_message);
+        host_input,
+        host_output,
+        layout.total_elements,
+        options.workload,
+        layout,
+        &error_message);
     if (!bitwise_correct) {
         throw std::runtime_error("Stream Benchmark 正确性失败: " + error_message);
     }
@@ -408,15 +417,21 @@ void append_csv(
     }
     const std::size_t accounted_traffic_bytes = layout.total_bytes * 4U;
 
+    // Pinned Sync 是题目规定的相对基线，因此其自身加速比固定为 1.0。
+    const bool use_pinned_memory = options.mode == "pinned_sync";
+    const char* pipeline_name =
+        use_pinned_memory ? "pinned_sync_v1" : "pageable_sync_v0";
+    const char* host_memory_type = use_pinned_memory ? "Pinned" : "Pageable";
+    const char* speedup_vs_pinned_sync = use_pinned_memory ? "1" : "nan";
+
     // 保留 double 结果的充足有效数字，便于从原始 CSV 重新计算统计量。
     output << std::setprecision(17);
 
     output << CUDA_FOUNDATIONS_GIT_COMMIT << ',' << utc_timestamp() << ','
            << csv_escape(capabilities.device_name) << ','
            << format_cuda_version(driver_version) << ','
-           << format_cuda_version(runtime_version)
-           << ",pageable_sync_v0,Pageable,cudaMemcpy,"
-              "stream_padded_transpose_kernel,"
+           << format_cuda_version(runtime_version) << ',' << pipeline_name << ','
+           << host_memory_type << ",cudaMemcpy,stream_padded_transpose_kernel,"
            << options.workload.width << ',' << options.workload.height
            << ",FP32," << grid_x << ',' << grid_y << ','
            << cuda_foundations::streams::kTileDim << ','
@@ -437,8 +452,8 @@ void append_csv(
            << result.end_to_end_us.p95 << ','
            << result.end_to_end_us.standard_deviation << ','
            << result.payload_throughput_gbps << ','
-           << result.accounted_traffic_rate_gbps << ",nan,"
-           << (result.bitwise_correct ? "true" : "false") << '\n';
+           << result.accounted_traffic_rate_gbps << ',' << speedup_vs_pinned_sync
+           << ',' << (result.bitwise_correct ? "true" : "false") << '\n';
 
     if (!output) {
         throw std::runtime_error("Stream CSV 写入失败: " + path);
@@ -461,11 +476,30 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaDriverGetVersion(&driver_version));
         CUDA_CHECK(cudaRuntimeGetVersion(&runtime_version));
 
-        // std::vector 在 V3.0 明确产生 Pageable Host Input 和 Output。
-        std::vector<float> host_input(layout.total_elements, 0.0F);
-        std::vector<float> host_output(
-            layout.total_elements,
-            cuda_foundations::test::float_from_bits(0xA5A5A5A5U));
+        // 两种同步模式只改变 Host Allocation；原始指针统一进入同一计时函数。
+        const bool use_pinned_memory = options.mode == "pinned_sync";
+        std::vector<float> pageable_input;
+        std::vector<float> pageable_output;
+        cuda_foundations::streams::PinnedHostBufferPair pinned_buffers{};
+        float* host_input = nullptr;
+        float* host_output = nullptr;
+
+        if (use_pinned_memory) {
+            // 两块 Pinned Buffer 各覆盖完整 512 MiB Payload，分配不计入时间。
+            pinned_buffers = cuda_foundations::streams::allocate_pinned_host_buffers(
+                layout.total_bytes);
+            host_input = pinned_buffers.input;
+            host_output = pinned_buffers.output;
+        } else {
+            // Pageable 回归继续使用 std::vector，便于在同一二进制中复测 V3.0。
+            pageable_input.assign(layout.total_elements, 0.0F);
+            pageable_output.assign(layout.total_elements, 0.0F);
+            host_input = pageable_input.data();
+            host_output = pageable_output.data();
+        }
+        const float host_sentinel =
+            cuda_foundations::test::float_from_bits(0xA5A5A5A5U);
+        std::fill_n(host_output, layout.total_elements, host_sentinel);
 
         // 计时前写遍所有 Host Page，同时用 Chunk ID 使各矩阵数据不同。
         for (std::size_t chunk = 0U; chunk < options.workload.chunk_count; ++chunk) {
@@ -477,15 +511,18 @@ int main(int argc, char** argv) {
             }
         }
 
-        // V3.0 只分配一对单 Chunk Device Buffer，分配不在计时范围内。
+        // V3.0/V3.1 都只分配一对单 Chunk Device Buffer，分配不计时。
         cuda_foundations::streams::DeviceBufferPair buffers =
             cuda_foundations::streams::allocate_device_buffers(layout.bytes_per_chunk);
 
         const BenchmarkResult result = benchmark_pipeline(
-            options, layout, host_input, &host_output, buffers);
+            options, layout, host_input, host_output, buffers);
 
-        // 正常路径在写 CSV 前释放 Device 资源，Host vector 由 RAII 回收。
+        // 正常路径按 Device 后 Host 的逆序释放；RAII 仍为异常路径兜底。
         cuda_foundations::streams::release_device_buffers(&buffers);
+        if (use_pinned_memory) {
+            cuda_foundations::streams::release_pinned_host_buffers(&pinned_buffers);
+        }
 
         if (!options.csv_path.empty()) {
             append_csv(options.csv_path,
@@ -504,9 +541,14 @@ int main(int argc, char** argv) {
         const double host_allocation_mib = total_payload_mib * 2.0;
         const double device_allocation_mib = chunk_mib * 2.0;
 
+        const char* pipeline_name =
+            use_pinned_memory ? "pinned_sync_v1" : "pageable_sync_v0";
+        const char* host_memory_name = use_pinned_memory
+                                           ? "Pinned (cudaMallocHost)"
+                                           : "Pageable (std::vector)";
         std::cout << std::fixed << std::setprecision(3)
-                  << "Pipeline: pageable_sync_v0\n"
-                  << "Host memory: Pageable (std::vector)\n"
+                  << "Pipeline: " << pipeline_name << '\n'
+                  << "Host memory: " << host_memory_name << '\n'
                   << "Copy API: cudaMemcpy (blocking)\n"
                   << "Kernel: stream_padded_transpose_kernel\n"
                   << "Shape/chunk: " << options.workload.width << 'x'
@@ -524,8 +566,9 @@ int main(int argc, char** argv) {
                   << "Chunks: " << options.workload.chunk_count << '\n'
                   << "Chunk: " << chunk_mib << " MiB\n"
                   << "Total input payload: " << total_payload_mib << " MiB\n"
-                  << "Pageable Host allocation (input + output): "
-                  << host_allocation_mib << " MiB\n"
+                  << (use_pinned_memory ? "Pinned" : "Pageable")
+                  << " Host allocation (input + output): " << host_allocation_mib
+                  << " MiB\n"
                   << "Device allocation (input + output): "
                   << device_allocation_mib << " MiB\n"
                   << "Warm-up pipelines: " << options.warmup_count << '\n'
